@@ -1,26 +1,47 @@
 services:
   mcp-server:
-    image: threadline-mcp:latest
-    build: ./mcp-server
-    container_name: threadline-mcp
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
-      interval: 3s
-      timeout: 3s
-      retries: 10
-      start_period: 3s
+    image: threadline-mcp:${APP_VERSION:-dev}
+    build:
+      context: ./mcp-server
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
+    environment:
+      MCP_TOKEN: ${MCP_TOKEN:?set MCP_TOKEN in .env}
+    # No host port on purpose: only the agent needs it. For debugging add
+    # `ports: ["127.0.0.1:8080:8080"]` in a docker-compose.override.yml.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    restart: unless-stopped
+    # healthcheck comes from the image's HEALTHCHECK
 
+  # The nightly job. Not started by `up`; run it on demand or from cron:
+  #   docker compose run --rm agent
   agent:
-    image: threadline-agent:latest
+    image: threadline-agent:${APP_VERSION:-dev}
     build:
       context: .
       dockerfile: agent-image/Dockerfile
-    container_name: threadline-agent
+    profiles: ["job"]
     depends_on:
       mcp-server:
         condition: service_healthy
     environment:
-      - MCP_URL=http://mcp-server:8080
+      MCP_URL: http://mcp-server:8080
+      MCP_TOKEN: ${MCP_TOKEN:?set MCP_TOKEN in .env}
     volumes:
-      - ./agent-stack/memory:/app/memory
-      - ./agent-stack/logs:/app/logs
+      - agent_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+
+volumes:
+  agent_data:

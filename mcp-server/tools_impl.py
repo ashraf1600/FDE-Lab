@@ -1,31 +1,34 @@
+"""Tool implementations (the only place tool logic lives)."""
 import csv
 import io
+import os
+
 import requests
 
+
 def parse_manifest(csv_text):
-    """Tool: turn raw CSV text into a list of shipment rows."""
-    reader = csv.DictReader(io.StringIO(csv_text))
-    return [row for row in reader]
+    return list(csv.DictReader(io.StringIO(csv_text)))
+
+
+def _weight_is_anomalous(value):
+    if value is None or str(value).strip() == "":
+        return True
+    try:
+        return float(value) == 0
+    except ValueError:
+        return True
+
 
 def flag_anomalies(rows):
-    """Tool: return rows where declared weight is missing or zero."""
-    flagged = []
-    for row in rows:
-        weight = row.get("weight", "0")
-        try:
-            if not weight or float(weight) == 0:
-                flagged.append(row)
-        except ValueError:
-            flagged.append(row)
-    return flagged
+    return [row for row in rows if _weight_is_anomalous(row.get("weight"))]
+
 
 def fetch_vendor_status(vendor_id):
-    """Tool: call an external API for a vendor's current status."""
+    url = os.environ.get("VENDOR_API_URL", "https://httpbin.org/get")
     try:
-        resp = requests.get(
-            f"https://httpbin.org/get?vendor={vendor_id}",
-            timeout=5,
-        )
-        return {"vendor": vendor_id, "ok": resp.status_code == 200}
-    except Exception as e:
+        resp = requests.get(url, params={"vendor": vendor_id}, timeout=5)
+    except requests.RequestException as e:
         return {"vendor": vendor_id, "ok": False, "error": str(e)}
+    if resp.status_code != 200:
+        return {"vendor": vendor_id, "ok": False, "error": f"HTTP {resp.status_code}"}
+    return {"vendor": vendor_id, "ok": True}

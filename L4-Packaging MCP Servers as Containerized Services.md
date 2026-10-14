@@ -4,430 +4,861 @@ It's been three weeks since you finished L3. The four-piece agent stack — orch
 
 Each of the new hires cloned the `agent-stack/` repo onto their laptop, ran `pip install requests`, and started the orchestrator locally. The tool module you wrote together — the one that talks to Threadline's vendor APIs and surfaces `fetch_vendor_status` and `parse_manifest` as tools — runs as a Python module inside the orchestrator process. Every laptop has its own copy of that module. Last week one of the new hires shipped a fix to `flag_anomalies` and forgot to push the change. Two days of nightly runs ran on stale anomaly logic before anyone noticed.
 
-You get a Slack message from Asha.
+You get a Slack message from Asha:
 
-*"Pull the tools out of the orchestrator process. Make them a service. I want one image the whole team pulls, not five laptops with five copies of the code."*
+> *"Pull the tools out of the orchestrator process. Make them a service. I want one image the whole team pulls, not five laptops with five copies of the code."*
 
-What looks like a packaging exercise is actually the moment the agent platform stops being a personal script and becomes team infrastructure. The tools become a network service. The orchestrator becomes a client. The whole thing runs in Docker so it runs the same way on Asha's laptop, the new hires' laptops, and the CI box that runs the nightly cron.
+What looks like a simple packaging exercise is actually the moment the agent platform stops being a personal script and becomes team infrastructure. The tools become a network service. The orchestrator becomes a client. The whole system runs in Docker so it behaves identically on Asha's laptop, the new hires' machines, and the CI server running the nightly cron job.
 
 ![architecture](https://raw.githubusercontent.com/poridhiEng/lab-asset/b6fb0d2cd8fb7baccef7157cfd46048792eaf249/Forward%20Deployed%20Engineering/Milestone%201/MDL-6%20Docker%20and%20Kubernetes%20in%20Agentic%20Workflows/Containerized%20Agent%20Runtimes/lab04/architecture.svg)
 
 By the end of this lab you'll have:
-- A standardized **Tool Service** that exposes tool schemas via `GET /tools` and execution via `POST /tools/<name>`,
-- An Orchestrator with a **Dynamic Tool Dispatcher** that never needs to hardcode tool wrappers,
-- Docker containerization for both services with volume-persisted atomic memory,
-- And a production-grade `docker-compose.yml` that supports both automated one-shot nightly batch runs and interactive execution.
+- A standardized **Tool Service** (MCP-style HTTP architecture) providing discovery (`GET /tools`), schema validation, and execution (`POST /tools/<name>`),
+- **Zero-Trust Security & Hardening**: Bearer token authentication (`MCP_TOKEN`), Gunicorn WSGI server, non-root users (`uid 10001`), read-only root filesystems, and dropped Linux capabilities,
+- A **Dynamic Tool Dispatcher** in the orchestrator that discovers schemas automatically and eliminates interface coupling and wrapper boilerplate,
+- **Preflight Readiness & Fail-Safe Abort**: Orchestrator preflight verification that ensures tools are available before touching state, exiting with status code 2 to avoid burning retry attempts,
+- **Continuous Atomic State Checkpointing**: Per-task durable state updates surviving hard process termination (`exit code 137`),
+- **Production Container Lifecycle**: One-shot worker containers (`docker compose run --rm agent`) with explicit exit codes, backed by Docker named volumes (`agent_data:/data`) for persistent state,
+- A **16-Test Automated Suite**: Validating tool schemas, token auth, fail-closed behavior, input validation, orchestrator retries, and OS-level crash recovery over real HTTP.
 
 ---
 
 ## The workspace layout
 
-You're building on top of L3. The existing `agent-stack/` directory from the previous lab is the starting point.
+You are building directly on top of the resilient components designed in L3 (`storage.py`, `memory.py`, `job_queue.py`). Here is the complete architecture layout:
 
 ```
-agent-stack/                          # L3's directory, updated for production
-├── memory/                           # state that survives restarts
-│   ├── state.json                    # (created at runtime)
-│   └── queue.json                    # (created at runtime)
-├── logs/                             # orchestrator decision log
-│   └── run.log                       # (created at runtime)
-├── memory.py                         # atomic state manager from L3
-├── job_queue.py                      # job queue from L3
-├── seed_queue.py                     # seeds work
-├── orchestrator.py                   # orchestrator with per-task persistence
-└── tools.py                          # DYNAMIC HTTP DISPATCHER (calls MCP service)
+agent-stack/                          # Orchestrator client & local durability
+├── memory/                           # State directory (local fallback)
+│   ├── state.json                    # Run-scoped atomic checkpoint file
+│   └── queue.json                    # Ordered work list
+├── logs/                             # Orchestrator audit log
+│   └── run.log                       # Decision and execution log
+├── storage.py                        # Atomic file write helper (fsync + os.replace)
+├── memory.py                         # Durable, run-scoped, per-task state machine
+├── job_queue.py                      # Queue manager (avoids stdlib collision)
+├── seed_queue.py                     # Seeds status & manifest tasks
+├── tools.py                          # DYNAMIC HTTP DISPATCHER & preflight readiness
+├── orchestrator.py                   # Orchestrator with preflight check & retries
+└── requirements.txt                  # requests==2.32.3
 
-mcp-server/                           # NEW: the Tool Service / MCP server
-├── server.py                         # tool service with schemas & execution
-├── tools_impl.py                     # the actual tool implementations
-├── requirements.txt                  # flask + requests
-└── Dockerfile                        # packages the service as an image
+mcp-server/                           # The Tool Service (MCP-Style)
+├── .dockerignore                     # Docker build exclusion rules
+├── Dockerfile                        # Hardened Python 3.11 image + Gunicorn + HEALTHCHECK
+├── requirements.txt                  # flask==3.0.3, requests==2.32.3, gunicorn==22.0.0
+├── server.py                         # Discovery, JSON schemas, Bearer auth, invoke
+└── tools_impl.py                     # Pure tool implementations (parse, flag, fetch)
 
 agent-image/                          # Dockerfile for orchestrator container
-└── Dockerfile
+└── Dockerfile                        # Non-root user + volume mount point (/data)
 
-docker-compose.yml                    # wires orchestrator + tool service
+tests/                                # 16 automated resiliency & unit tests
+├── _paths.py                         # Sys.path configuration
+├── test_tool_service.py              # Schema discovery, auth, validation, error masking
+├── test_orchestrator.py              # State machine, retries, resume, preflight check
+└── test_integration.py               # Real HTTP servers + OS process hard-kill crash tests
+
+docker-compose.yml                    # Multi-container orchestration with security profiles
+.env.example                          # Environment variable template (MCP_TOKEN, APP_VERSION)
+.dockerignore                         # Global Docker build exclusion rules
 ```
 
 ---
 
-## Chapter 1 — Confirm Docker and the L3 stack
+## Chapter 1 — Environment Prerequisites & Configuration
 
-Confirm environment prerequisites:
+Confirm your Docker environment and Python installation:
 
 ```bash
 docker --version
-docker info | head -5
-ls agent-stack/
+docker compose version
+python3 --version
 ```
 
-Seed the queue to verify the L3 components are functioning:
+### 1.1 Configure Environment Secrets (`.env`)
+In production, internal microservices must not be left unauthenticated. We use Bearer token authentication to enforce zero trust between the orchestrator and the tool service.
+
+Copy the template and generate a cryptographically strong secret token:
 
 ```bash
-cd agent-stack && python3 seed_queue.py
-cd ..
+cp .env.example .env
 ```
+
+Generate and assign a secure token:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Update your `.env` file with the generated token:
+
+```env
+MCP_TOKEN=your_generated_secret_token_here
+APP_VERSION=0.2.0
+```
+
+> [!IMPORTANT]
+> The `.env` file contains runtime secrets and is listed in `.gitignore`. Never commit `.env` into source control.
 
 ---
 
-## Chapter 2 — What a Tool Service / MCP Server Actually Is
+## Chapter 2 — The MCP Tool Service Contract
 
-In L3, `orchestrator.py` imported tools directly (`import tools`). In production, this causes interface drift: if someone adds a tool to the server, you shouldn't have to rewrite boilerplate in the orchestrator.
+In L3, `orchestrator.py` imported tools directly (`import tools`). In production, this creates **Interface Coupling & Drift**: whenever a developer modifies a tool or adds new parameters, every consumer's wrapper code breaks or requires manual synchronization.
 
-A true tool service satisfies two contracts:
-1. **Discovery (`GET /tools`):** Tells the caller what tools exist, their descriptions, and their required parameter schemas (JSON Schema).
-2. **Execution (`POST /tools/<name>`):** Takes arguments in JSON, runs the tool, and returns the result in JSON.
+A true tool service decouples tool evolution from orchestrator logic through a two-part contract:
+1. **Liveness & Version (`GET /health`):** Unauthenticated endpoint for Docker and Kubernetes readiness probes, reporting the service version and available tool names.
+2. **Discovery (`GET /tools`):** Authenticated endpoint returning all available tools, their descriptions, and strict JSON Schemas for input parameters.
+3. **Execution (`POST /tools/<name>`):** Authenticated endpoint accepting a JSON object of arguments, validating the payload against the tool's schema, executing the tool, and returning the result or a sanitized error.
 
-This decouples the release cycle of vendor API integrations from the orchestrator logic.
+```
+       Discovery (GET /tools)
+Orchestrator --------------> Tool Service (Returns JSON Schemas)
+             <--------------
+       Execution (POST /tools/<name>)
+             --------------> Tool Service (Validates inputs & executes)
+             <-------------- (Returns JSON result)
+```
+
+> [!NOTE]
+> **MCP-Style HTTP vs Official MCP SDK:**
+> This lab implements an MCP-style HTTP architecture (discovery + JSON Schema + execution). While production systems may choose the official Anthropic Model Context Protocol SDK over SSE/Stdio transports, the architectural principles of schema discovery, dynamic dispatch, and interface decoupling are identical.
 
 ---
 
-## Chapter 3 — Build the Tool Implementations
+## Chapter 3 — Build the Pure Tool Implementations
 
-Move the tool implementations out of the agent stack into the dedicated `mcp-server/` directory:
+Move all business tool logic out of the orchestrator into `mcp-server/tools_impl.py`. These functions are pure business logic; they have no HTTP routing or authentication dependencies:
 
-```bash
-mkdir -p mcp-server && cd mcp-server
-```
-
-Create `mcp-server/tools_impl.py`:
+`mcp-server/tools_impl.py`:
 
 ```python
+"""Tool implementations (the only place tool logic lives)."""
 import csv
 import io
+import os
+
 import requests
+
 
 def parse_manifest(csv_text):
     """Tool: turn raw CSV text into a list of shipment rows."""
-    reader = csv.DictReader(io.StringIO(csv_text))
-    return [row for row in reader]
+    return list(csv.DictReader(io.StringIO(csv_text)))
+
+
+def _weight_is_anomalous(value):
+    if value is None or str(value).strip() == "":
+        return True
+    try:
+        return float(value) == 0
+    except ValueError:
+        return True
+
 
 def flag_anomalies(rows):
-    """Tool: return rows where declared weight is missing or zero."""
-    flagged = []
-    for row in rows:
-        weight = row.get("weight", "0")
-        try:
-            if not weight or float(weight) == 0:
-                flagged.append(row)
-        except ValueError:
-            flagged.append(row)
-    return flagged
+    """Tool: return rows where declared weight is missing, zero, or non-numeric."""
+    return [row for row in rows if _weight_is_anomalous(row.get("weight"))]
+
 
 def fetch_vendor_status(vendor_id):
-    """Tool: call an external API for a vendor's current status."""
+    """Tool: query external vendor status API."""
+    url = os.environ.get("VENDOR_API_URL", "https://httpbin.org/get")
     try:
-        resp = requests.get(
-            f"https://httpbin.org/get?vendor={vendor_id}",
-            timeout=5,
-        )
-        return {"vendor": vendor_id, "ok": resp.status_code == 200}
-    except Exception as e:
+        resp = requests.get(url, params={"vendor": vendor_id}, timeout=5)
+    except requests.RequestException as e:
         return {"vendor": vendor_id, "ok": False, "error": str(e)}
+    if resp.status_code != 200:
+        return {"vendor": vendor_id, "ok": False, "error": f"HTTP {resp.status_code}"}
+    return {"vendor": vendor_id, "ok": True}
 ```
 
 ---
 
 ## Chapter 4 — Build the Schema-Aware Tool Service
 
-Create `mcp-server/requirements.txt`:
+### 4.1 Dependencies (`mcp-server/requirements.txt`)
+We use Gunicorn as the production WSGI server instead of Flask's built-in development server:
 
 ```
 flask==3.0.3
-requests==2.31.0
+requests==2.32.3
+gunicorn==22.0.0
 ```
 
-Create `mcp-server/server.py` with discovery and schema definitions:
+### 4.2 Production Server (`mcp-server/server.py`)
+The tool service enforces:
+- **Bearer Token Auth:** Constant-time token verification using `hmac.compare_digest` to prevent timing attacks.
+- **Fail-Closed Security:** Rejects all traffic with HTTP 503 if no `MCP_TOKEN` is configured.
+- **Input Validation:** Verifies required arguments, disallows unexpected properties (`additionalProperties: False`), and validates argument data types.
+- **Information Leak Prevention:** Catches execution errors, logs the stack trace to the server log, and returns a sanitized generic error to clients.
+
+`mcp-server/server.py`:
 
 ```python
+"""Tool service: an MCP-style HTTP service (JSON in, JSON out).
+
+  GET  /health          no auth   liveness + version + tool names
+  GET  /tools           auth      discovery: name, description, input schema
+  POST /tools/<name>    auth      call a tool with a JSON object of arguments
+"""
+import hmac
+import logging
 import os
-from flask import Flask, request, jsonify
+
+from flask import Flask, jsonify, request
+
 import tools_impl
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("tool-service")
 
-# Tool registry with JSON schemas
+VERSION = os.environ.get("APP_VERSION", "dev")
+
 TOOLS = {
     "parse_manifest": {
         "fn": tools_impl.parse_manifest,
-        "description": "Parse raw CSV manifest text into shipment dict rows",
-        "parameters": {
+        "description": "Parse raw CSV text into a list of shipment rows.",
+        "input_schema": {
             "type": "object",
             "properties": {"csv_text": {"type": "string"}},
-            "required": ["csv_text"]
-        }
+            "required": ["csv_text"],
+            "additionalProperties": False,
+        },
     },
     "flag_anomalies": {
         "fn": tools_impl.flag_anomalies,
-        "description": "Flag shipments with missing or zero weight",
-        "parameters": {
+        "description": "Return rows whose weight is missing, zero or not a number.",
+        "input_schema": {
             "type": "object",
             "properties": {"rows": {"type": "array"}},
-            "required": ["rows"]
-        }
+            "required": ["rows"],
+            "additionalProperties": False,
+        },
     },
     "fetch_vendor_status": {
         "fn": tools_impl.fetch_vendor_status,
-        "description": "Query external vendor status API",
-        "parameters": {
+        "description": "Call the vendor API and report whether the vendor is OK.",
+        "input_schema": {
             "type": "object",
             "properties": {"vendor_id": {"type": "string"}},
-            "required": ["vendor_id"]
-        }
-    }
+            "required": ["vendor_id"],
+            "additionalProperties": False,
+        },
+    },
 }
 
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"ok": True, "tools": list(TOOLS.keys())})
+_PY_TYPES = {
+    "string": str, "array": list, "object": dict,
+    "boolean": bool, "integer": int, "number": (int, float),
+}
 
-@app.route("/tools", methods=["GET"])
+
+def validate(args, schema):
+    """Tiny schema check (required / unknown keys / basic types). None = valid."""
+    if not isinstance(args, dict):
+        return "arguments must be a JSON object"
+    props = schema.get("properties", {})
+    for key in schema.get("required", []):
+        if key not in args:
+            return f"missing required argument: {key}"
+    for key, value in args.items():
+        if key not in props:
+            if schema.get("additionalProperties") is False:
+                return f"unexpected argument: {key}"
+            continue
+        expected = _PY_TYPES.get(props[key].get("type"))
+        if expected and (
+            not isinstance(value, expected)
+            or (expected is not bool and isinstance(value, bool))
+        ):
+            return f"argument '{key}' must be of type {props[key]['type']}"
+    return None
+
+
+def _auth_error():
+    token = os.environ.get("MCP_TOKEN", "")
+    if not token:
+        # Fail closed: a service with no token configured serves nothing.
+        return jsonify({"error": "server auth is not configured"}), 503
+    header = request.headers.get("Authorization", "")
+    supplied = header[7:] if header.startswith("Bearer ") else ""
+    if not hmac.compare_digest(supplied.encode(), token.encode()):
+        return jsonify({"error": "unauthorized"}), 401
+    return None
+
+
+@app.get("/health")
+def health():
+    return jsonify({"ok": True, "version": VERSION, "tools": sorted(TOOLS)})
+
+
+@app.get("/tools")
 def list_tools():
-    """Discovery endpoint: returns tool names and their JSON schemas."""
+    err = _auth_error()
+    if err:
+        return err
     return jsonify({
-        name: {
-            "description": meta["description"],
-            "parameters": meta["parameters"]
-        }
-        for name, meta in TOOLS.items()
+        "tools": [
+            {"name": n, "description": t["description"], "input_schema": t["input_schema"]}
+            for n, t in sorted(TOOLS.items())
+        ]
     })
 
-@app.route("/tools/<name>", methods=["POST"])
+
+@app.post("/tools/<name>")
 def invoke(name):
-    if name not in TOOLS:
+    err = _auth_error()
+    if err:
+        return err
+    tool = TOOLS.get(name)
+    if tool is None:
         return jsonify({"error": f"unknown tool: {name}"}), 404
-    
-    args = request.get_json(silent=True) or {}
+    args = request.get_json(silent=True)
+    if args is None:
+        args = {}
+    problem = validate(args, tool["input_schema"])
+    if problem:
+        return jsonify({"error": f"bad arguments: {problem}"}), 400
     try:
-        result = TOOLS[name]["fn"](**args)
-        return jsonify({"result": result})
-    except TypeError as e:
-        return jsonify({"error": f"bad arguments: {e}"}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"result": tool["fn"](**args)})
+    except Exception:
+        log.exception("tool %s crashed", name)
+        return jsonify({"error": "tool execution failed"}), 500
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="127.0.0.1", port=8080)
 ```
 
-Create `mcp-server/Dockerfile`:
+### 4.3 Hardened Container Image (`mcp-server/Dockerfile`)
+The Dockerfile adopts production best practices:
+- Runs as an unprivileged system user (`uid 10001`) with `/usr/sbin/nologin`.
+- Uses Python's standard `urllib.request` for the Docker `HEALTHCHECK` probe (eliminating unnecessary `curl` installation).
+- Runs under Gunicorn WSGI with 2 worker processes and configured timeouts.
+
+`mcp-server/Dockerfile`:
 
 ```dockerfile
 FROM python:3.11-slim
 
-WORKDIR /app
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION} \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY tools_impl.py .
-COPY server.py .
+COPY tools_impl.py server.py ./
 
-RUN useradd -m -s /bin/bash mcp
+# Non-root system user, no login shell
+RUN useradd --system --uid 10001 --shell /usr/sbin/nologin mcp
 USER mcp
 
 EXPOSE 8080
-CMD ["python", "server.py"]
-```
 
-Build the image:
+# Built-in Python healthcheck (no extra packages required)
+HEALTHCHECK --interval=5s --timeout=3s --start-period=5s --retries=10 \
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health', timeout=2).status == 200 else 1)"
 
-```bash
-docker build -t threadline-mcp:latest .
-cd ..
+# Production WSGI server
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "30", "server:app"]
 ```
 
 ---
 
 ## Chapter 5 — Rewire Orchestrator as a Dynamic Client
 
-Instead of maintaining hardcoded wrapper functions that re-introduce interface drift, the orchestrator's `tools.py` becomes a generic dispatcher.
+In this chapter, the orchestrator becomes a client of the tool service. Instead of writing custom Python functions for every tool, the orchestrator uses a generic dynamic dispatcher.
 
-Update `agent-stack/tools.py`:
+### 5.1 The Dynamic Tool Dispatcher (`agent-stack/tools.py`)
+`agent-stack/tools.py` contains **zero tool implementations**. It provides:
+1. `call(name, **kwargs)`: Generic dispatcher injecting Authorization headers and handling network timeouts.
+2. `list_tools()`: Retrieves schemas dynamically from `GET /tools`.
+3. `wait_until_ready(required, timeout)`: Preflight probe that checks `/health` and verifies that all required tools exist before orchestrator execution begins.
+
+`agent-stack/tools.py`:
 
 ```python
+"""HTTP client for the tool service. Contains NO tool implementation."""
 import os
+import time
+
 import requests
 
-MCP_URL = os.environ.get("MCP_URL", "http://mcp-server:8080")
 
-def get_available_tools():
-    """Discover available tools from the service."""
-    resp = requests.get(f"{MCP_URL}/tools", timeout=5)
-    resp.raise_for_status()
-    return resp.json()
+class ToolServiceError(RuntimeError):
+    """The service answered, but with an error (bad args, unknown tool, 5xx)."""
 
-def call_tool(tool_name, **kwargs):
-    """Generic dynamic tool invoker."""
-    resp = requests.post(
-        f"{MCP_URL}/tools/{tool_name}",
-        json=kwargs,
-        timeout=10
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    if "error" in body:
-        raise RuntimeError(body["error"])
-    return body["result"]
+
+class ToolServiceUnavailable(ToolServiceError):
+    """The service could not be reached at all (down, DNS, timeout)."""
+
+
+def _url():
+    return os.environ.get("MCP_URL", "http://mcp-server:8080").rstrip("/")
+
+
+def _headers():
+    token = os.environ.get("MCP_TOKEN", "")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _timeout():
+    return float(os.environ.get("MCP_TIMEOUT", "15"))
+
+
+def _error_text(resp):
+    try:
+        return resp.json().get("error", resp.text)
+    except ValueError:
+        return resp.text[:200]
+
+
+def call(name, **kwargs):
+    try:
+        resp = requests.post(
+            f"{_url()}/tools/{name}", json=kwargs, headers=_headers(), timeout=_timeout()
+        )
+    except requests.RequestException as e:
+        raise ToolServiceUnavailable(f"{name}: {e}") from e
+    if resp.status_code >= 400:
+        raise ToolServiceError(f"{name}: HTTP {resp.status_code}: {_error_text(resp)}")
+    return resp.json()["result"]
+
+
+def list_tools():
+    """Discover tools and their JSON schemas from the service."""
+    try:
+        resp = requests.get(f"{_url()}/tools", headers=_headers(), timeout=_timeout())
+    except requests.RequestException as e:
+        raise ToolServiceUnavailable(str(e)) from e
+    if resp.status_code >= 400:
+        raise ToolServiceError(f"GET /tools: HTTP {resp.status_code}: {_error_text(resp)}")
+    return {t["name"]: t for t in resp.json()["tools"]}
+
+
+def wait_until_ready(required=(), timeout=30.0):
+    """Preflight: wait for /health, then verify every required tool exists."""
+    deadline = time.monotonic() + timeout
+    last = "no attempt"
+    while True:
+        try:
+            requests.get(f"{_url()}/health", timeout=3).raise_for_status()
+            break
+        except requests.RequestException as e:
+            last = str(e)
+        if time.monotonic() >= deadline:
+            raise ToolServiceUnavailable(f"tool service not ready after {timeout}s: {last}")
+        time.sleep(1)
+    available = list_tools()
+    missing = [t for t in required if t not in available]
+    if missing:
+        raise ToolServiceError(f"tool service is missing required tools: {missing}")
+    return available
 ```
 
-Update `agent-stack/orchestrator.py` to persist after every task and handle retries properly:
+### 5.2 Resilient Orchestrator (`agent-stack/orchestrator.py`)
+The orchestrator maintains the durability guarantees developed in L3:
+- **Preflight Verification:** Checks tool availability *before* reading or creating run state. If the tool service is down or unreachable, it exits with **code 2** without consuming task retry attempts.
+- **Multi-Step Execution:** Supports both `status` calls and multi-tool composite workflows (`manifest` parses CSV, then passes rows to `flag_anomalies`).
+- **Bounded Retries with Backoff:** Retries transient failures with exponential backoff up to `MAX_ATTEMPTS`.
+- **Exit Codes:**
+  - `0`: All tasks completed successfully.
+  - `1`: One or more tasks failed after exhausting retries.
+  - `2`: Tool service unavailable (run aborted before touching state).
+
+`agent-stack/orchestrator.py`:
 
 ```python
+"""Orchestrator (L4): crash-safe loop with containerized tool service."""
 import os
-import job_queue as q
+import sys
+import time
+from datetime import datetime, timezone
+
+import job_queue
 import memory
+import storage
 import tools
 
-MAX_ATTEMPTS = 3
-LOG_PATH = os.path.join("logs", "run.log")
+REQUIRED_TOOLS = ("fetch_vendor_status", "parse_manifest", "flag_anomalies")
+
+
+def _max_attempts():
+    return int(os.environ.get("MAX_ATTEMPTS", "3"))
+
+
+def _backoff():
+    return float(os.environ.get("RETRY_BACKOFF", "0.5"))
+
 
 def log(msg):
-    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-    with open(LOG_PATH, "a") as f:
-        f.write(msg + "\n")
-    print(f"[orchestrator] {msg}")
+    line = f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} {msg}"
+    print(f"[orchestrator] {line}", flush=True)
+    os.makedirs(storage.log_dir(), exist_ok=True)
+    with open(os.path.join(storage.log_dir(), "run.log"), "a") as f:
+        f.write(line + "\n")
 
-def run():
-    tasks = q.load()
-    state = memory.get_or_create_run()
-    log(f"Starting orchestrator run '{state['run_id']}' with {len(tasks)} tasks")
 
-    for task in tasks:
-        task_id = task["id"]
-        task_state = memory.get_task_state(task_id)
+def execute(task):
+    kind = task["type"]
+    if kind == "status":
+        return tools.call("fetch_vendor_status", vendor_id=task["vendor_id"])
+    if kind == "manifest":
+        rows = tools.call("parse_manifest", csv_text=task["csv"])
+        flagged = tools.call("flag_anomalies", rows=rows)
+        return {"ok": True, "rows": len(rows), "anomalies": flagged}
+    raise ValueError(f"unknown task type: {kind}")
 
-        if task_state.get("status") == "done":
-            log(f"Skipping {task_id} (already done)")
-            continue
 
-        if task_state.get("attempts", 0) >= MAX_ATTEMPTS:
-            log(f"Skipping {task_id} (exceeded max attempts)")
-            continue
-
-        attempts = memory.record_attempt(task_id)
-        log(f"Processing {task_id} via Tool Service (attempt {attempts})")
-
+def process(state, task):
+    tid = task["id"]
+    attempts = _max_attempts()
+    for attempt in range(1, attempts + 1):
+        memory.record(state, tid, "running")
+        result, error = None, None
         try:
-            if task["type"] == "status":
-                result = tools.call_tool("fetch_vendor_status", vendor_id=task["vendor_id"])
-            else:
-                result = {"ok": False, "error": f"Unknown type: {task['type']}"}
-
-            if result.get("ok"):
-                memory.update_task_state(task_id, status="done", result=result)
-                log(f"Completed {task_id}: {result}")
-            else:
-                err = result.get("error", "tool reported failure")
-                memory.update_task_state(task_id, status="failed", error=err)
-                log(f"Failed {task_id}: {err}")
-
+            result = execute(task)
+            if isinstance(result, dict) and result.get("ok") is True:
+                memory.record(state, tid, "done", result=result)
+                log(f"Completed {tid}: {result}")
+                return True
+            error = (result or {}).get("error", "tool reported failure")
         except Exception as e:
-            memory.update_task_state(task_id, status="failed", error=str(e))
-            log(f"Exception during {task_id}: {e}")
+            error = str(e)
+        memory.record(state, tid, "failed", result=result, error=error)
+        log(f"Attempt {attempt}/{attempts} failed for {tid}: {error}")
+        if attempt < attempts:
+            time.sleep(_backoff() * 2 ** (attempt - 1))
+    return False
 
-    log("Orchestrator finished run.")
+
+def run(run_id=None):
+    run_id = (
+        run_id
+        or os.environ.get("RUN_ID")
+        or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    )
+    tasks = job_queue.load()
+
+    # Preflight BEFORE touching state: a down service must not burn attempts.
+    try:
+        tools.wait_until_ready(
+            REQUIRED_TOOLS, timeout=float(os.environ.get("MCP_WAIT", "30"))
+        )
+    except tools.ToolServiceError as e:
+        log(f"ABORT: tool service unusable: {e}")
+        return 2
+
+    state = memory.load(run_id)
+    crash_after = int(os.environ.get("CRASH_AFTER", "0"))  # test hook
+    log(f"Run {run_id}: {len(tasks)} tasks, state so far {memory.summary(state)}")
+
+    handled = 0
+    for task in tasks:
+        tid = task["id"]
+        if memory.get(state, tid).get("status") == "done":
+            log(f"Skipping {tid} (already done in run {run_id})")
+            continue
+        log(f"Processing {tid}")
+        process(state, task)
+        handled += 1
+        if crash_after and handled >= crash_after:
+            log(f"CRASH HOOK: dying hard after {handled} task(s)")
+            os._exit(137)
+
+    summary = memory.summary(state)
+    log(f"Run {run_id} finished: {summary}")
+    return 0 if summary.get("done", 0) == len(tasks) else 1
+
 
 if __name__ == "__main__":
-    run()
+    sys.exit(run())
+```
+
+### 5.3 Work Queue Seeding (`agent-stack/seed_queue.py`)
+Seeds vendor status tasks alongside manifest anomaly verification tasks:
+
+`agent-stack/seed_queue.py`:
+
+```python
+import job_queue
+
+SAMPLE_MANIFEST = "shipment_id,weight\nS1,12.5\nS2,0\nS3,\nS4,abc\n"
+
+tasks = [
+    {"id": "vendor-a", "type": "status", "vendor_id": "A"},
+    {"id": "vendor-b", "type": "status", "vendor_id": "B"},
+    {"id": "vendor-c", "type": "status", "vendor_id": "C"},
+    {"id": "manifest-1", "type": "manifest", "csv": SAMPLE_MANIFEST},
+]
+job_queue.seed(tasks)
+print(f"Seeded {len(tasks)} tasks into the queue")
 ```
 
 ---
 
 ## Chapter 6 — Containerize Orchestrator & Docker Compose
 
-Create `agent-image/Dockerfile`:
+### 6.1 Orchestrator Container (`agent-image/Dockerfile`)
+The orchestrator image runs as an unprivileged user (`agent`, UID 10001) and expects state to be mounted at `/data`:
+
+`agent-image/Dockerfile`:
 
 ```dockerfile
+# Build context is the repo root: docker compose --profile job build
 FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    AGENT_DATA_DIR=/data \
+    AGENT_LOG_DIR=/data/logs
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir requests==2.31.0
+COPY agent-stack/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY agent-stack/memory.py .
-COPY agent-stack/job_queue.py .
-COPY agent-stack/tools.py .
-COPY agent-stack/orchestrator.py .
+COPY agent-stack/storage.py agent-stack/memory.py agent-stack/job_queue.py \
+     agent-stack/tools.py agent-stack/orchestrator.py agent-stack/seed_queue.py ./
 
-RUN mkdir -p memory logs
-RUN useradd -m -s /bin/bash agent
+# Create /data with ownership assigned to the non-root user
+RUN useradd --system --uid 10001 --shell /usr/sbin/nologin agent \
+    && mkdir -p /data/logs \
+    && chown -R agent:agent /data
 USER agent
 
 CMD ["python", "orchestrator.py"]
 ```
 
-Build the agent image:
+### 6.2 Multi-Service Composition (`docker-compose.yml`)
+The composition coordinates both services with defense-in-depth isolation:
+- **No Exposed Host Ports:** `mcp-server` is accessible only across the internal Docker network.
+- **One-Shot Execution:** `agent` uses `profiles: ["job"]` so it never runs automatically on `docker compose up`. It runs on demand or via cron via `docker compose run --rm agent`.
+- **Security Hardening:** Read-only root filesystem (`read_only: true`), `/tmp` temporary scratch space (`tmpfs`), dropped capabilities (`cap_drop: [ALL]`), `no-new-privileges: true`, and memory limits (`mem_limit: 256m`).
+- **Persistent Volume:** Docker named volume `agent_data` persists state across container lifecycles.
 
-```bash
-docker build -f agent-image/Dockerfile -t threadline-agent:latest .
-```
-
-Create `docker-compose.yml`:
+`docker-compose.yml`:
 
 ```yaml
 services:
   mcp-server:
-    image: threadline-mcp:latest
-    build: ./mcp-server
-    container_name: threadline-mcp
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
-      interval: 3s
-      timeout: 3s
-      retries: 10
-      start_period: 3s
+    image: threadline-mcp:${APP_VERSION:-dev}
+    build:
+      context: ./mcp-server
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
+    environment:
+      MCP_TOKEN: ${MCP_TOKEN:?set MCP_TOKEN in .env}
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    restart: unless-stopped
 
   agent:
-    image: threadline-agent:latest
+    image: threadline-agent:${APP_VERSION:-dev}
     build:
       context: .
       dockerfile: agent-image/Dockerfile
-    container_name: threadline-agent
+    profiles: ["job"]
     depends_on:
       mcp-server:
         condition: service_healthy
     environment:
-      - MCP_URL=http://mcp-server:8080
+      MCP_URL: http://mcp-server:8080
+      MCP_TOKEN: ${MCP_TOKEN:?set MCP_TOKEN in .env}
     volumes:
-      - ./agent-stack/memory:/app/memory
-      - ./agent-stack/logs:/app/logs
+      - agent_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+
+volumes:
+  agent_data:
 ```
 
 ---
 
-## Chapter 7 — Run and Verify
+## Chapter 7 — Comprehensive Automated Testing Suite (16 Tests)
 
-Bring up the tool service:
+Before deploying container images, execute the automated test suite. The suite tests all layers without requiring Docker daemon access:
 
 ```bash
-docker compose up -d mcp-server
+python3 -m unittest discover -s tests -v
 ```
 
-Run the nightly orchestrator job as a one-shot container:
+### Test Coverage Highlights:
+1. **Tool Service Unit Tests (`tests/test_tool_service.py` - 8 tests):**
+   - `test_health_needs_no_auth_and_reports_version_and_tools`: Verifies unauthenticated probe and version tagging.
+   - `test_auth_required_on_tools_and_calls`: Verifies 401 Unauthorized for missing or invalid tokens.
+   - `test_fails_closed_when_token_not_configured`: Verifies 503 response if server has empty secret.
+   - `test_discovery_lists_schemas`: Validates JSON schema catalog on `GET /tools`.
+   - `test_unknown_tool_is_404`: Confirms 404 for unmapped tools.
+   - `test_argument_validation_returns_400`: Confirms rejection of unexpected keys, wrong types, or missing required fields.
+   - `test_tools_work`: Validates manifest parsing and anomaly flagging.
+   - `test_internal_errors_do_not_leak_details`: Verifies 500 responses do not leak sensitive paths or stack traces.
 
+2. **Orchestrator Logic Tests (`tests/test_orchestrator.py` - 4 tests):**
+   - `test_resume_skips_done`: Verifies idempotent restart skips previously completed tasks.
+   - `test_manifest_task_uses_parse_then_flag`: Verifies chained tool execution.
+   - `test_vendor_failure_is_failed_not_done_then_retried`: Confirms failed tasks are marked `failed` and retried on subsequent runs.
+   - `test_service_unavailable_aborts_without_touching_state`: Confirms exit code 2 and leaves state untouched if tools are down.
+
+3. **Real HTTP & Hard-Crash Integration Tests (`tests/test_integration.py` - 4 tests):**
+   - `test_full_run_through_the_real_service`: Complete run over live HTTP Werkzeug server and mock vendor endpoint.
+   - `test_hard_kill_then_resume_no_duplicate_vendor_calls`: Process terminated with `exit code 137` after task 1; subsequent run resumes and makes zero duplicate vendor calls.
+   - `test_wrong_token_aborts_cleanly`: Confirms exit code 2 on token rejection.
+   - `test_service_down_aborts_cleanly`: Confirms exit code 2 when port is unreachable.
+
+All 16 architectural and integration tests pass:
+
+```
+Ran 16 tests in 7.576s
+
+OK
+```
+
+---
+
+## Chapter 8 — Run and Verify with Docker Compose
+
+### 8.1 Build the Production Images
+Build both services with the version tag specified in `.env`:
+
+```bash
+docker compose --profile job build
+```
+
+### 8.2 Start the Tool Service
+Launch the background tool service and confirm its readiness probe succeeds:
+
+```bash
+docker compose up -d
+docker compose ps
+```
+
+Or when running locally for development:
+```powershell
+$env:MCP_TOKEN = (Get-Content .env | Where-Object { $_ -match '^MCP_TOKEN=(.+)' } | ForEach-Object { $matches[1] })
+python mcp-server/server.py
+```
+
+The server initializes on port 8080 and verifies incoming requests against the configured Bearer token:
+
+![MCP Server Startup & Authenticated Traffic Proof](./assets/l4_mcp_server_startup.png)
+
+### 8.3 Verify Tool Discovery Endpoint
+Query the tool catalog with your Bearer token:
+
+**In PowerShell (Clean 2-space indentation):**
+```powershell
+$token = (Get-Content .env | Where-Object { $_ -match '^MCP_TOKEN=(.+)' } | ForEach-Object { $matches[1] })
+(Invoke-RestMethod -Uri http://127.0.0.1:8080/tools -Headers @{ Authorization = "Bearer $token" } | ConvertTo-Json -Depth 5 -Compress) | python -m json.tool --indent 2
+```
+
+**In Bash:**
+```bash
+TOKEN=$(grep MCP_TOKEN .env | cut -d '=' -f2)
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/tools | jq .
+```
+
+The tool service responds with HTTP 200 and publishes strict JSON Schemas for each registered tool:
+
+![MCP Tool Discovery Schema Response Proof](./assets/l4_mcp_tools_discovery.png)
+
+### 8.4 Seed the Work Queue
+Seed the job queue inside the environment:
+
+**With Docker Compose:**
+```bash
+docker compose run --rm agent python seed_queue.py
+```
+
+**Or directly against the running Tool Service:**
+```powershell
+python agent-stack/seed_queue.py
+```
+
+### 8.5 Execute the Nightly One-Shot Job
+Run the batch job container:
+
+**With Docker Compose:**
 ```bash
 docker compose run --rm agent
 ```
 
-Check the persisted logs on the host:
-
-```bash
-cat agent-stack/logs/run.log
-cat agent-stack/memory/state.json
+**Or directly in PowerShell:**
+```powershell
+$env:MCP_URL = "http://127.0.0.1:8080"
+$env:MCP_TOKEN = (Get-Content .env | Where-Object { $_ -match '^MCP_TOKEN=(.+)' } | ForEach-Object { $matches[1] })
+python agent-stack/orchestrator.py
 ```
 
-Tear down services when complete:
+Check the job return code:
+```bash
+# In Bash:
+echo $?
+# In PowerShell:
+$LASTEXITCODE
+```
+A return code of `0` indicates all queue tasks succeeded.
+
+The orchestrator dynamically dispatches status and manifest tasks to the MCP Tool Service, successfully completing all 4 tasks and atomically recording state:
+
+![Orchestrator Batch Run Execution Proof](./assets/l4_orchestrator_batch_run.png)
+
+### 8.6 Inspect Persisted State & Execution Logs
+Verify that state survived in the Docker named volume:
+
+```bash
+docker compose run --rm agent cat /data/logs/run.log
+docker compose run --rm agent cat /data/state.json
+```
+
+Notice:
+- Each task status is recorded as `"done"` with its execution timestamp and return payload.
+- Repeating `docker compose run --rm agent` immediately finishes with all tasks skipped (`already done in run`).
+
+### 8.7 Tear Down
+Stop the services while preserving the named volume:
 
 ```bash
 docker compose down
 ```
 
-### Production Outcomes:
-1. **Zero Interface Drift:** Adding a new tool to `mcp-server` automatically advertises it on `GET /tools`.
-2. **Crash-Proof Checkpointing:** State is saved atomically after each task.
-3. **One-Shot Execution:** Eliminates artificial `tail -f /dev/null` workarounds in production containers.
+---
+
+## Chapter 9 — Production Reality: Top Architectural Pillars for Lab 4
+
+| Dimension | Toy Implementation | Production Reality |
+| :--- | :--- | :--- |
+| **Tool Protocol (MCP)** | Custom Flask POST without schema validation; vulnerable to injection | **MCP-Style Discovery (`GET /tools`)** with JSON Schema verification and Bearer authentication |
+| **Interface Coupling & Drift** | Duplicated wrappers in orchestrator requiring edits on tool change | **Generic Dynamic Tool Dispatcher** (`tools.call(name, **kwargs)`) requiring zero client wrappers |
+| **Preflight Readiness** | Orchestrator starts immediately and burns retry attempts if service is down | **Fail-Safe Preflight Check** (`wait_until_ready()`) exiting with code 2 before modifying state |
+| **Container Lifecycle** | Anti-pattern `tail -f /dev/null` blocking container | **One-Shot Worker** (`docker compose run --rm agent`) with explicit exit codes suitable for cron |
+| **Security & Hardening** | Flask dev server running as root on exposed host port | **Gunicorn WSGI**, non-root UID 10001, `read_only: true`, `cap_drop: [ALL]`, internal network |
+| **State Storage** | Host bind mount subject to host filesystem UID mismatch | **Named Docker Volume (`agent_data:/data`)** with isolated ownership |
+| **Failure Recovery** | Saves state only at loop completion | **Atomic Per-Task Checkpointing** using `fsync` and `os.replace` surviving `exit code 137` |
+
+---
+
+## Conclusion & Next Steps
+
+By transforming the orchestrator's local tool functions into an independent, containerized tool service, you have:
+1. Eliminated interface drift across team members' environments,
+2. Fortified the runtime with production-grade Linux container hardening and Bearer token security,
+3. Preserved atomic crash recovery and idempotent replay guarantees across distributed network boundaries.
+
+In **Lab 5**, you will connect this architecture to a local inference sidecar, serving DeepSeek models with GPU acceleration to drive dynamic agent decision-making.

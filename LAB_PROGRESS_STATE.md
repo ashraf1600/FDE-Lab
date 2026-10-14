@@ -8,7 +8,7 @@
 | Lab | Title | Status | Embedded Screenshots |
 |---|---|---|---|
 | **Lab 3** | Composing the Agent Stack: Orchestrator, Tools, Memory & Queue | **100% COMPLETE** ✅ | 4 / 4 Complete |
-| **Lab 4** | Packaging MCP Servers as Containerized Services | **READY TO RESUME** ⏳ | 0 / 2 Embedded (Code & Env Ready) |
+| **Lab 4** | Packaging MCP Servers as Containerized Services | **100% COMPLETE** ✅ | 3 / 3 Complete |
 | **Lab 5** | Local Inference Sidecars: Serving DeepSeek with GPU Passthrough | **UPCOMING** 📋 | 0 / 2 Pending |
 
 ---
@@ -35,34 +35,37 @@ All code tested, validated, and embedded into [L3-Composing the Agent Stack- Orc
 
 ---
 
-## 🚀 Lab 4 Ready-State & Exact Resume Instructions (For Tomorrow)
+## 📁 Lab 4 Completed Milestones & Proofs
 
-### Current Setup Status:
-- Server code ready in `mcp-server/`:
-  - `server.py` (Flask tool service on port 8080)
-  - `tools_impl.py` (`parse_manifest`, `flag_anomalies`, `fetch_vendor_status`)
-  - `requirements.txt` & `Dockerfile`
-- Python environment: Flask 3.1.3 and Requests 2.34.2 installed and tested.
-- Discovery endpoint `GET /tools` and execution endpoint `POST /tools/fetch_vendor_status` verified working locally.
+All code tested, validated, and embedded into [L4-Packaging MCP Servers as Containerized Services.md](./L4-Packaging%20MCP%20Servers%20as%20Containerized%20Services.md):
 
-### Exact Steps to Resume Tomorrow:
+1. **MCP Server Startup & Authenticated Traffic Logging:**
+   - Asset: `assets/l4_mcp_server_startup.png`
+   - Verified: Server started with Bearer token authentication, listening on `http://127.0.0.1:8080`, successfully responding with HTTP 200 to health and discovery requests.
+   - Highlights: Red boxes on `Running on http://127.0.0.1:8080` and `GET /tools HTTP/1.1 200` logs.
+2. **Tool Discovery Endpoint (`GET /tools`):**
+   - Asset: `assets/l4_mcp_tools_discovery.png`
+   - Verified: Clean 2-space indented JSON schema output for all 3 tools (`fetch_vendor_status`, `flag_anomalies`, `parse_manifest`) with strict validation parameters.
+   - Highlights: Red boxes on Bearer token command, `fetch_vendor_status` schema, and `flag_anomalies` schema.
+3. **Automated Resiliency & Unit Test Suite:**
+   - Verified: 16/16 tests pass (`tests/test_tool_service.py`, `tests/test_orchestrator.py`, `tests/test_integration.py`), verifying discovery, Bearer token auth, schema validation, error masking, retries, and OS hard-kill crash recovery over live HTTP.
+4. **Orchestrator Batch Run Execution:**
+   - Asset: `assets/l4_orchestrator_batch_run.png`
+   - Verified: `seed_queue.py` successfully queued 4 tasks; orchestrator dynamically dispatched vendor status calls and composite manifest anomaly detection to the MCP Tool Service, atomically completing all 4 tasks (`finished: {'done': 4}`).
+   - Highlights: Red boxes on queue seeding, composite manifest execution, and completed run status.
 
-1. **Terminal 1 — Start the MCP Server:**
-   ```powershell
-   cd "d:\Complete Data Science,Machine Learning,DL,NLP Bootcamp.torrent\Telegram Desktop\FDE-Lab\mcp-server"
-   python server.py
-   ```
-   *(Keep this terminal open and running)*
+---
 
-2. **Terminal 2 — Test Discovery Endpoint:**
-   ```powershell
-   Invoke-RestMethod -Uri http://localhost:8080/tools | ConvertTo-Json -Depth 5
-   ```
+## 🚀 Lab 5: Local Inference Sidecars (Next Up)
 
-3. **Screenshot #1 to Capture & Upload:**
-   - Capture Terminal 2 showing the JSON response of the 3 tool schemas.
-   - Upload screenshot to chat.
-   - **Assistant Action:** Add clean red bounding boxes around key schema fields, save to `assets/l4_mcp_tools_discovery.png`, embed into `L4-Packaging MCP Servers as Containerized Services.md`, and guide to the next step.
+### Overview & Objective:
+- Serve DeepSeek models (e.g. `deepseek-r1:1.5b`) locally via an Ollama sidecar container with optional GPU passthrough.
+- Build an air-gapped, model-aware healthcheck probe and Docker named volume (`ollama_cache`) to prevent re-downloading multi-GB weights.
+- Integrate the local LLM sidecar into the orchestrator loop to reason through tool outputs and generate structured executive reports.
+
+### Codebase Status:
+- Files in `lab5-inference/`: `client/`, `server/`, `prompts/`, and `docker-compose.yml`.
+- Ready for audit against `PRODUCTION_REALITY_TOP5.md` (Pillars 4 & 5).
 
 ---
 

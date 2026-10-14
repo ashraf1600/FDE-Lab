@@ -1,0 +1,7 @@
+mcp-server/
+tests/
+.git/
+.env
+*.md
+**/__pycache__/
+*.pyc

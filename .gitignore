@@ -12,6 +12,13 @@ venv/
 .venv/
 env/
 
+# Environments and secrets
+.env
+
+# Runtime outputs
+logs/
+memory/
+
 # Operating System files
 .DS_Store
 Thumbs.db
