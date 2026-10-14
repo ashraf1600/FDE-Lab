@@ -1,36 +1,52 @@
+# Default = runs anywhere (CPU). For an NVIDIA GPU add the GPU override:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 services:
   inference-server:
-    image: inference-server:latest
-    build: ./server
-    container_name: inference-server
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    image: inference-server:${APP_VERSION:-dev}
+    build:
+      context: ./server
+      args:
+        OLLAMA_VERSION: ${OLLAMA_VERSION:-0.5.7}
+    environment:
+      OLLAMA_MODEL: ${LLM_MODEL:-deepseek-r1:1.5b}
+      PULL_ON_START: ${PULL_ON_START:-1}
     volumes:
-      - ollama_cache:/root/.ollama
+      # Models live in a named volume, so they survive `docker compose down`.
+      - ollama_models:/root/.ollama
+    security_opt:
+      - no-new-privileges:true
+    restart: on-failure:3
+    # Healthy only when the MODEL is present, not merely when the API answers.
+    # ~10 minutes of tolerance for the first download.
     healthcheck:
-      test: ["CMD-SHELL", "ollama list | grep -q 'deepseek-r1:1.5b' || exit 1"]
+      test: ["CMD-SHELL", "ollama list | grep -qE \"^$${OLLAMA_MODEL}[[:space:]]\""]
       interval: 5s
       timeout: 5s
-      retries: 30
-      start_period: 20s
+      retries: 120
+      start_period: 10s
+    # No host port on purpose; see docker-compose.debug.yml to expose it locally.
 
+  # One-shot client. Not started by `up`:
+  #   docker compose run --rm inference-client
   inference-client:
-    image: inference-client:latest
+    image: inference-client:${APP_VERSION:-dev}
     build: ./client
-    container_name: inference-client
+    profiles: ["job"]
     depends_on:
       inference-server:
         condition: service_healthy
     environment:
-      - INFERENCE_URL=http://inference-server:11434
-      - INFERENCE_MODEL=deepseek-r1:1.5b
+      INFERENCE_URL: http://inference-server:11434
+      INFERENCE_MODEL: ${LLM_MODEL:-deepseek-r1:1.5b}
     volumes:
       - ./prompts:/prompts:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
 
 volumes:
-  ollama_cache:
+  ollama_models:

@@ -1,5 +1,5 @@
 # FDE Lab Progress & State Tracker
-**Last Updated:** 2026-10-14 01:40 (Local Time)
+**Last Updated:** 2026-10-15 (Local Time)
 
 ---
 
@@ -9,7 +9,7 @@
 |---|---|---|---|
 | **Lab 3** | Composing the Agent Stack: Orchestrator, Tools, Memory & Queue | **100% COMPLETE** ✅ | 4 / 4 Complete |
 | **Lab 4** | Packaging MCP Servers as Containerized Services | **100% COMPLETE** ✅ | 3 / 3 Complete |
-| **Lab 5** | Local Inference Sidecars: Serving DeepSeek with GPU Passthrough | **UPCOMING** 📋 | 0 / 2 Pending |
+| **Lab 5** | Local Inference Sidecars: Serving DeepSeek with GPU Passthrough | **IN PROGRESS (Code Synchronized & Ready)** ⏳ | 0 / 2 Pending Execution Proofs |
 
 ---
 
@@ -56,20 +56,25 @@ All code tested, validated, and embedded into [L4-Packaging MCP Servers as Conta
 
 ---
 
-## 🚀 Lab 5: Local Inference Sidecars (Next Up)
+## 🚀 Lab 5: Local Inference Sidecars & Capstone Loop
 
-### Overview & Objective:
-- Serve DeepSeek models (e.g. `deepseek-r1:1.5b`) locally via an Ollama sidecar container with optional GPU passthrough.
-- Build an air-gapped, model-aware healthcheck probe and Docker named volume (`ollama_cache`) to prevent re-downloading multi-GB weights.
-- Integrate the local LLM sidecar into the orchestrator loop to reason through tool outputs and generate structured executive reports.
-
-### Codebase Status:
-- Files in `lab5-inference/`: `client/`, `server/`, `prompts/`, and `docker-compose.yml`.
-- Ready for audit against `PRODUCTION_REALITY_TOP5.md` (Pillars 4 & 5).
+### Upgrades Applied from `lab5-fixed`:
+- **Decoupled Compute:** `docker-compose.yml` defaults to CPU so it runs anywhere without requiring an NVIDIA GPU. `docker-compose.gpu.yml` is an optional override for CUDA GPUs.
+- **Resilient Startup & Teardown:** `server/entrypoint.sh` includes trap handlers for clean SIGTERM shutdowns and explicit non-zero exit codes on pull failures.
+- **Persistent Volume:** Model weights cached in named volume `ollama_models:/root/.ollama` (persists across `down`).
+- **Model-Aware Healthcheck:** Waits specifically for `grep -qE "^$${OLLAMA_MODEL}[[:space:]]"` in `ollama list`.
+- **Reasoning Cleaner:** Client strips `<think>...</think>` tokens emitted by DeepSeek-R1.
+- **Capstone Integration:** `capstone/agent_loop.py` unifies L3 (Atomic State), L4 (Authenticated MCP Server), and L5 (DeepSeek-R1 Reasoning).
 
 ---
 
-## 🛠️ Environment Notes
-- **OS:** Windows
-- **Drive:** Workspace resides on `D:` drive (`~30.4 GB` free space).
-- **Python:** 3.11 with `Pillow`, `flask`, `requests`.
+## 🛠️ Computing Resources & Host Hardware Audit
+
+- **CPU:** AMD Ryzen 5 5500U with Radeon Graphics (6 Cores / 12 Logical Processors) — **Sufficient for `deepseek-r1:1.5b` CPU inference**.
+- **RAM:** 8.0 GB RAM Total — **Enough for 1.5B model (~2GB memory footprint); 7B model requires 16GB RAM and will crash/OOM**.
+- **GPU:** AMD Radeon(TM) Integrated Graphics (512 MB VRAM). **No NVIDIA discrete GPU** — **Must use CPU mode (`docker-compose.yml`)**.
+- **Storage Breakdown:**
+  - **Drive C:** `1.6 GB` free — ⚠️ **CRITICAL WARNING:** Docker Desktop default virtual disk location (`C:`) must be freed or relocated, as Docker image + 1.5B model requires ~3.5 GB.
+  - **Drive D:** `30.4 GB` free — Ideal location for repository and caches.
+  - **Drive E:** `109.4 GB` free.
+- **Docker Engine:** Docker CLI / daemon is currently not in Windows PATH.

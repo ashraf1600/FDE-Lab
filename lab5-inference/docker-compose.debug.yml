@@ -1,0 +1,5 @@
+# Expose the server on the host (localhost only) for curl / debugging.
+services:
+  inference-server:
+    ports:
+      - "127.0.0.1:11434:11434"

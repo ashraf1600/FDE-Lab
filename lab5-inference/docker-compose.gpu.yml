@@ -1,0 +1,10 @@
+# NVIDIA GPU passthrough (needs NVIDIA driver + NVIDIA Container Toolkit on the host).
+services:
+  inference-server:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
