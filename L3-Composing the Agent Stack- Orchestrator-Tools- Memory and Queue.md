@@ -368,7 +368,7 @@ Between test runs, inspect the final persisted atomic state:
 cat memory/state.json
 ```
 
-The resulting state on disk confirms the scoped `run_id`, successful completion of all vendors, and the recorded `attempts: 2` for `vendor-b`:
+The resulting state on disk confirms the scoped `run_id` ("2026-10-14") and the successful completion (`"done"`) of all vendors following the crash and resume cycle:
 
 ![Final Persisted State Proof](./assets/l3_state_json_proof.png)
 

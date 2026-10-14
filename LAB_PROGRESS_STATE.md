@@ -30,7 +30,7 @@ All code tested, validated, and embedded into [L3-Composing the Agent Stack- Orc
    - Highlights: Red boxes on exit code 137 with disk state `{ "vendor-a": "done" }` and `Skipping vendor-a (already done in run)`.
 4. **Atomic State Persistence:**
    - Asset: `assets/l3_state_json_proof.png`
-   - Verified: `memory/state.json` contains scoped `run_id` and recorded `attempts: 2` for `vendor-b`.
+   - Verified: `memory/state.json` contains scoped `run_id` ("2026-10-14") and completed (`"done"`) status for all vendors following crash recovery.
    - Highlights: Red boxes on `run_id` and `vendor-b` state.
 
 ---
