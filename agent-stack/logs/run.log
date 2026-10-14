@@ -46,3 +46,14 @@ Current state snapshot: {'vendor-a': {'status': 'done', 'attempts': 1, 'updated_
 2026-10-14T04:53:49+00:00 Processing vendor-c
 2026-10-14T04:53:50+00:00 Completed vendor-c: {'vendor': 'C', 'ok': True}
 2026-10-14T04:53:50+00:00 Run 2026-10-14 finished: {'done': 3}
+2026-10-14T05:28:49+00:00 Run 2026-10-14: 3 tasks, state so far {}
+2026-10-14T05:28:49+00:00 Processing vendor-a
+2026-10-14T05:28:50+00:00 Completed vendor-a: {'vendor': 'A', 'ok': True}
+2026-10-14T05:28:50+00:00 CRASH HOOK: dying hard after 1 task(s)
+2026-10-14T05:28:51+00:00 Run 2026-10-14: 3 tasks, state so far {'done': 1}
+2026-10-14T05:28:51+00:00 Skipping vendor-a (already done in run 2026-10-14)
+2026-10-14T05:28:51+00:00 Processing vendor-b
+2026-10-14T05:28:52+00:00 Completed vendor-b: {'vendor': 'B', 'ok': True}
+2026-10-14T05:28:52+00:00 Processing vendor-c
+2026-10-14T05:28:54+00:00 Completed vendor-c: {'vendor': 'C', 'ok': True}
+2026-10-14T05:28:54+00:00 Run 2026-10-14 finished: {'done': 3}

@@ -318,33 +318,43 @@ All 8 architectural tests pass cleanly, confirming zero state loss or duplicated
 
 ## Chapter 7 — Prove the system survives a real crash
 
-Simulate a crash during execution by manually marking one task as failed, resetting another, and observing that completed tasks are skipped while failed/pending tasks resume safely.
+Simulate a real process crash during execution by injecting `CRASH_AFTER=1` into `orchestrator.py`. The process dies hard via `os._exit(137)` (equivalent to `SIGKILL` / `kill -9`), leaving state safely saved on disk. When rerun, completed tasks are skipped while remaining tasks resume safely.
 
 Create the file at `agent-stack/simulate_crash.py`:
 
 ```python
+"""Real crash simulation: the orchestrator process dies hard after 1 task,
+then is started again. No editing of state files by hand."""
+import json
+import os
+import subprocess
+import sys
+
 import memory
+import storage
 
-state = memory._load()
-# Simulate vendor-a succeeded, but vendor-b crashed mid-attempt
-if "vendor-a" in state.get("tasks", {}):
-    state["tasks"]["vendor-a"]["status"] = "done"
-if "vendor-b" in state.get("tasks", {}):
-    state["tasks"]["vendor-b"]["status"] = "pending"
-    state["tasks"]["vendor-b"]["attempts"] = 1
+env = dict(os.environ, CRASH_AFTER="1")
+print(">>> run 1 (will die after the first task)")
+code = subprocess.run([sys.executable, "orchestrator.py"], env=env).returncode
+print(f">>> run 1 exit code: {code}")
 
-memory._save(state)
-print("Simulated crash: vendor-a done, vendor-b reset to pending with 1 attempt")
+state = json.load(open(os.path.join(storage.data_dir(), "state.json")))
+print(">>> state on disk after the crash:")
+print(json.dumps({k: v["status"] for k, v in state["tasks"].items()}, indent=2))
+
+print(">>> run 2 (resume, no crash hook)")
+env.pop("CRASH_AFTER")
+code = subprocess.run([sys.executable, "orchestrator.py"], env=env).returncode
+print(f">>> run 2 exit code: {code}")
 ```
 
-Run the crash simulation, then run orchestrator again:
+Run the real crash simulation:
 
 ```bash
 python3 simulate_crash.py
-python3 orchestrator.py
 ```
 
-Notice: `vendor-a` is skipped immediately (already done), `vendor-b` resumes for its second try (`attempt 2/3`) and completes, and the entire state is checkpointed atomically:
+Notice: Run 1 dies hard after `vendor-a` with `exit code: 137`. The state on disk safely preserves `vendor-a: done`. On run 2, the orchestrator resumes, skips `vendor-a` (`already done in run`), completes `vendor-b` and `vendor-c`, and exits with code `0`:
 
 ![Crash Recovery and Retry Verification](./assets/l3_crash_recovery_proof.png)
 

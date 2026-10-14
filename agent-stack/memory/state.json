@@ -1,0 +1,32 @@
+{
+  "run_id": "2026-10-14",
+  "tasks": {
+    "vendor-a": {
+      "attempts": 1,
+      "status": "done",
+      "updated_at": "2026-10-14T05:28:50+00:00",
+      "result": {
+        "vendor": "A",
+        "ok": true
+      }
+    },
+    "vendor-b": {
+      "attempts": 1,
+      "status": "done",
+      "updated_at": "2026-10-14T05:28:52+00:00",
+      "result": {
+        "vendor": "B",
+        "ok": true
+      }
+    },
+    "vendor-c": {
+      "attempts": 1,
+      "status": "done",
+      "updated_at": "2026-10-14T05:28:54+00:00",
+      "result": {
+        "vendor": "C",
+        "ok": true
+      }
+    }
+  }
+}

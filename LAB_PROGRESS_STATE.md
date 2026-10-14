@@ -24,10 +24,10 @@ All code tested, validated, and embedded into [L3-Composing the Agent Stack- Orc
 2. **Queue Seeding & Idempotency Run:**
    - Asset: `assets/l3_orchestrator_run.png`
    - Verified: Tasks loaded from `queue.json`, skipped already completed tasks (`already done`).
-3. **Crash Recovery & Retry Execution:**
+3. **Crash Recovery & Real Process Termination Proof:**
    - Asset: `assets/l3_crash_recovery_proof.png`
-   - Verified: `simulate_crash.py` resets `vendor-b`; orchestrator resumes with `attempt 2/3` and succeeds without duplicating `vendor-a`.
-   - Highlights: Red boxes on idempotency skip and retry execution.
+   - Verified: `simulate_crash.py` hard-kills process after 1 task (`exit code: 137`); orchestrator resumes on run 2, skips `vendor-a` (`already done in run`), and completes remaining tasks with exit code 0.
+   - Highlights: Red boxes on exit code 137 with disk state `{ "vendor-a": "done" }` and `Skipping vendor-a (already done in run)`.
 4. **Atomic State Persistence:**
    - Asset: `assets/l3_state_json_proof.png`
    - Verified: `memory/state.json` contains scoped `run_id` and recorded `attempts: 2` for `vendor-b`.
