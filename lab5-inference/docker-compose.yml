@@ -1,0 +1,36 @@
+services:
+  inference-server:
+    image: inference-server:latest
+    build: ./server
+    container_name: inference-server
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ollama_cache:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q 'deepseek-r1:1.5b' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  inference-client:
+    image: inference-client:latest
+    build: ./client
+    container_name: inference-client
+    depends_on:
+      inference-server:
+        condition: service_healthy
+    environment:
+      - INFERENCE_URL=http://inference-server:11434
+      - INFERENCE_MODEL=deepseek-r1:1.5b
+    volumes:
+      - ./prompts:/prompts:ro
+
+volumes:
+  ollama_cache:

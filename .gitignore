@@ -1,0 +1,18 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.tmp
+
+# Large archives
+*.zip
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini

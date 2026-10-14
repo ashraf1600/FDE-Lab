@@ -1,0 +1,48 @@
+Starting orchestrator run '2026-10-13' with 3 tasks
+Processing vendor-a (attempt 1/3)
+Completed vendor-a: {'vendor': 'A', 'ok': True}
+Processing vendor-b (attempt 1/3)
+Completed vendor-b: {'vendor': 'B', 'ok': True}
+Processing vendor-c (attempt 1/3)
+Completed vendor-c: {'vendor': 'C', 'ok': True}
+Orchestrator finished processing queue.
+Current state snapshot: {'vendor-a': {'status': 'done', 'attempts': 1, 'updated_at': '2026-10-13T17:51:14.869183', 'result': {'vendor': 'A', 'ok': True}}, 'vendor-b': {'status': 'done', 'attempts': 1, 'updated_at': '2026-10-13T17:51:16.203803', 'result': {'vendor': 'B', 'ok': True}}, 'vendor-c': {'status': 'done', 'attempts': 1, 'updated_at': '2026-10-13T17:51:17.637031', 'result': {'vendor': 'C', 'ok': True}}}
+Starting orchestrator run '2026-10-13' with 3 tasks
+Skipping vendor-a (already done)
+Processing vendor-b (attempt 2/3)
+Completed vendor-b: {'vendor': 'B', 'ok': True}
+Skipping vendor-c (already done)
+Orchestrator finished processing queue.
+Current state snapshot: {'vendor-a': {'status': 'done', 'attempts': 1, 'updated_at': '2026-10-13T17:51:14.869183', 'result': {'vendor': 'A', 'ok': True}}, 'vendor-b': {'status': 'done', 'attempts': 2, 'updated_at': '2026-10-13T17:51:32.069357', 'result': {'vendor': 'B', 'ok': True}}, 'vendor-c': {'status': 'done', 'attempts': 1, 'updated_at': '2026-10-13T17:51:17.637031', 'result': {'vendor': 'C', 'ok': True}}}
+Starting orchestrator run '2026-10-13' with 3 tasks
+Skipping vendor-a (already done)
+Skipping vendor-b (already done)
+Skipping vendor-c (already done)
+Orchestrator finished processing queue.
+Current state snapshot: {'vendor-a': {'status': 'done', 'attempts': 1, 'updated_at': '2026-10-13T17:51:14.869183', 'result': {'vendor': 'A', 'ok': True}}, 'vendor-b': {'status': 'done', 'attempts': 2, 'updated_at': '2026-10-13T17:51:32.069357', 'result': {'vendor': 'B', 'ok': True}}, 'vendor-c': {'status': 'done', 'attempts': 1, 'updated_at': '2026-10-13T17:51:17.637031', 'result': {'vendor': 'C', 'ok': True}}}
+Starting orchestrator run '2026-10-13' with 3 tasks
+Skipping vendor-a (already done)
+Processing vendor-b (attempt 2/3)
+Completed vendor-b: {'vendor': 'B', 'ok': True}
+Skipping vendor-c (already done)
+Orchestrator finished processing queue.
+Current state snapshot: {'vendor-a': {'status': 'done', 'attempts': 1, 'updated_at': '2026-10-13T17:51:14.869183', 'result': {'vendor': 'A', 'ok': True}}, 'vendor-b': {'status': 'done', 'attempts': 2, 'updated_at': '2026-10-13T19:13:31.708935', 'result': {'vendor': 'B', 'ok': True}}, 'vendor-c': {'status': 'done', 'attempts': 1, 'updated_at': '2026-10-13T17:51:17.637031', 'result': {'vendor': 'C', 'ok': True}}}
+2026-10-14T04:47:21+00:00 Run 2026-10-14: 3 tasks, state so far {}
+2026-10-14T04:47:21+00:00 Processing vendor-a
+2026-10-14T04:47:22+00:00 Completed vendor-a: {'vendor': 'A', 'ok': True}
+2026-10-14T04:47:22+00:00 Processing vendor-b
+2026-10-14T04:47:24+00:00 Completed vendor-b: {'vendor': 'B', 'ok': True}
+2026-10-14T04:47:24+00:00 Processing vendor-c
+2026-10-14T04:47:25+00:00 Completed vendor-c: {'vendor': 'C', 'ok': True}
+2026-10-14T04:47:25+00:00 Run 2026-10-14 finished: {'done': 3}
+2026-10-14T04:53:46+00:00 Run 2026-10-14: 3 tasks, state so far {}
+2026-10-14T04:53:46+00:00 Processing vendor-a
+2026-10-14T04:53:47+00:00 Completed vendor-a: {'vendor': 'A', 'ok': True}
+2026-10-14T04:53:47+00:00 CRASH HOOK: dying hard after 1 task(s)
+2026-10-14T04:53:47+00:00 Run 2026-10-14: 3 tasks, state so far {'done': 1}
+2026-10-14T04:53:47+00:00 Skipping vendor-a (already done in run 2026-10-14)
+2026-10-14T04:53:47+00:00 Processing vendor-b
+2026-10-14T04:53:49+00:00 Completed vendor-b: {'vendor': 'B', 'ok': True}
+2026-10-14T04:53:49+00:00 Processing vendor-c
+2026-10-14T04:53:50+00:00 Completed vendor-c: {'vendor': 'C', 'ok': True}
+2026-10-14T04:53:50+00:00 Run 2026-10-14 finished: {'done': 3}

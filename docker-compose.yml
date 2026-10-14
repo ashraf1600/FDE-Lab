@@ -1,0 +1,26 @@
+services:
+  mcp-server:
+    image: threadline-mcp:latest
+    build: ./mcp-server
+    container_name: threadline-mcp
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+  agent:
+    image: threadline-agent:latest
+    build:
+      context: .
+      dockerfile: agent-image/Dockerfile
+    container_name: threadline-agent
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+    environment:
+      - MCP_URL=http://mcp-server:8080
+    volumes:
+      - ./agent-stack/memory:/app/memory
+      - ./agent-stack/logs:/app/logs

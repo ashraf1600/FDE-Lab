@@ -1,0 +1,10 @@
+Summarize the following vendor incident report in two sentences,
+suitable for a Slack message to the head of operations.
+
+Incident ID: INC-2026-0811
+Vendor: Acme Shipping
+Started: 2026-08-11 03:14 UTC
+Resolved: 2026-08-11 04:02 UTC
+Impact: 14 shipments delayed, no data loss.
+Root cause: upstream API rate-limit hit on the 03:00 polling job.
+Remediation: bump polling cadence to 10 minutes, add 429 backoff.

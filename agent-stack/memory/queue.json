@@ -1,0 +1,17 @@
+[
+  {
+    "id": "vendor-a",
+    "type": "status",
+    "vendor_id": "A"
+  },
+  {
+    "id": "vendor-b",
+    "type": "status",
+    "vendor_id": "B"
+  },
+  {
+    "id": "vendor-c",
+    "type": "status",
+    "vendor_id": "C"
+  }
+]
