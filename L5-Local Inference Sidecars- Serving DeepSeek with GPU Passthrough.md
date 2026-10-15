@@ -8,10 +8,10 @@ External third-party LLM APIs (OpenAI, Anthropic) have real-world drawbacks: str
 
 The production solution is a **Local Inference Sidecar**:
 - One container runs an inference server (Ollama) with host GPU access or CPU fallback.
-- A **Docker Named Volume** (`ollama_models:/root/.ollama`) persists model weights locally on the host disk, guaranteeing true air-gapped, zero-download restarts.
+- A **Docker Named Volume** (`ollama_models:/root/.ollama`) persists model weights on the host disk, so after the first pull every restart is zero-download (`PULL_ON_START=0` then runs fully offline).
 - An OpenAI-compatible HTTP interface (`/v1/chat/completions`) acts as the standard contract.
 - A Python client connects to the sidecar, filters reasoning tokens (`<think>` blocks from DeepSeek-R1), and produces clean structured output.
-- **Capstone Integration:** We connect L3's Orchestrator & State, L4's Containerized MCP Tool Service (with Bearer Token auth), and L5's Inference Sidecar into a complete autonomous agent stack.
+- **Capstone Integration:** One agent step that uses L3's durable run-scoped state, L4's containerized MCP-style tool service (Bearer auth), and L5's local DeepSeek to choose and call a tool.
 
 ![architecture](https://raw.githubusercontent.com/poridhiEng/lab-asset/refs/heads/main/Forward%20Deployed%20Engineering/Milestone%201/MDL-6%20Docker%20and%20Kubernetes%20in%20Agentic%20Workflows/Containerized%20Agent%20Runtimes/L5/architecture.png)
 
@@ -59,9 +59,10 @@ lab5-inference/
 │   └── check_gpu.sh              # verifies whether inference runs on GPU or CPU
 ├── tests/
 │   ├── test_client.py            # Unit tests for client with mock OpenAI server
-│   └── test_entrypoint.py        # Validates startup, model checking, and offline modes
+│   ├── test_entrypoint.py        # Validates startup, model checking, and offline modes
+│   └── test_capstone.py          # Parsing/validation of DeepSeek tool calls
 ├── capstone/
-│   └── agent_loop.py             # THE UNIFIED AGENT: Orchestrator + MCP Tools + LLM
+│   └── agent_loop.py             # Capstone: L3 state + L4 MCP tools + L5 DeepSeek
 ├── docker-compose.yml            # Default CPU composition (zero extra drivers needed)
 ├── docker-compose.gpu.yml        # NVIDIA GPU passthrough override
 ├── docker-compose.debug.yml      # Host port binding override (port 11434)
@@ -78,15 +79,19 @@ Create `.env` from `.env.example`:
 cp .env.example .env
 ```
 
-Configuration variables available in `.env`:
+Configuration variables available in `.env` (all optional; these are the defaults):
 ```ini
 LLM_MODEL=deepseek-r1:1.5b
-APP_VERSION=0.2.0
-OLLAMA_VERSION=0.5.7
+# 1 = download the model if missing (needs internet); 0 = offline mode
 PULL_ON_START=1
+OLLAMA_VERSION=0.5.7
+APP_VERSION=0.2.0
+# Client: seconds to wait for an answer (CPU is slow), 1 = hide <think> reasoning
 INFERENCE_TIMEOUT=120
 STRIP_THINK=1
 ```
+
+`INFERENCE_TIMEOUT` and `STRIP_THINK` are passed to the client container by `docker-compose.yml`.
 
 ---
 
@@ -181,6 +186,163 @@ Features:
 - Implements exponential backoff retries for network resilience.
 - Returns explicit exit codes (`0` ok, `2` unreachable, `3` model missing, `4` bad response).
 
+`client/summarize.py`:
+
+```python
+"""Client for an OpenAI-compatible chat endpoint (the Ollama sidecar).
+
+Speaks only HTTP + JSON: no Ollama SDK, no model files, no GPU knowledge.
+
+Exit codes:  0 ok | 2 server unreachable/timeout | 3 model not on server |
+             4 bad or failed response
+Config (env): INFERENCE_URL, INFERENCE_MODEL, INFERENCE_TIMEOUT (read, s),
+  INFERENCE_RETRIES, INFERENCE_RETRY_BACKOFF, INFERENCE_MAX_TOKENS,
+  INFERENCE_TEMPERATURE, STRIP_THINK (1 = drop <think>...</think> blocks)
+"""
+import os
+import re
+import sys
+import time
+
+import requests
+
+OK, UNREACHABLE, MODEL_MISSING, BAD_RESPONSE = 0, 2, 3, 4
+
+
+class InferenceError(Exception):
+    def __init__(self, exit_code, message):
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def _url():
+    return os.environ.get("INFERENCE_URL", "http://inference-server:11434").rstrip("/")
+
+
+def _model():
+    return os.environ.get("INFERENCE_MODEL", "deepseek-r1:1.5b")
+
+
+def _timeout():
+    return (5, float(os.environ.get("INFERENCE_TIMEOUT", "120")))  # (connect, read)
+
+
+def _retries():
+    return int(os.environ.get("INFERENCE_RETRIES", "3"))
+
+
+def _backoff():
+    return float(os.environ.get("INFERENCE_RETRY_BACKOFF", "1.0"))
+
+
+def strip_think(text):
+    """DeepSeek-R1 may emit its reasoning inside <think>...</think>."""
+    return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
+
+
+def list_models():
+    """Model ids the server has, or None if the backend has no /v1/models."""
+    try:
+        resp = requests.get(f"{_url()}/v1/models", timeout=_timeout())
+    except requests.RequestException as e:
+        raise InferenceError(UNREACHABLE, f"cannot reach {_url()}: {e}") from e
+    if resp.status_code == 404:
+        return None
+    if resp.status_code != 200:
+        raise InferenceError(BAD_RESPONSE, f"/v1/models returned HTTP {resp.status_code}")
+    return {m["id"] for m in resp.json().get("data", [])}
+
+
+def ensure_model(model):
+    available = list_models()
+    if available is None:
+        return  # backend cannot list models; let the chat call decide
+    wanted = {model} | ({f"{model}:latest"} if ":" not in model else set())
+    if not wanted & available:
+        raise InferenceError(
+            MODEL_MISSING,
+            f"model '{model}' is not on the server (has: {sorted(available) or 'nothing'}).\n"
+            f"Pull it:  docker compose exec inference-server ollama pull {model}",
+        )
+
+
+def chat(prompt):
+    model = _model()
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": float(os.environ.get("INFERENCE_TEMPERATURE", "0")),
+        "max_tokens": int(os.environ.get("INFERENCE_MAX_TOKENS", "1024")),
+        "stream": False,
+    }
+    attempts = _retries()
+    last = None
+    for i in range(attempts):
+        try:
+            resp = requests.post(f"{_url()}/v1/chat/completions", json=body, timeout=_timeout())
+        except requests.RequestException as e:  # connection error or timeout
+            last = InferenceError(UNREACHABLE, f"request failed: {e}")
+        else:
+            if resp.status_code == 404:
+                raise InferenceError(MODEL_MISSING, f"server answered 404 for model '{model}'")
+            if resp.status_code >= 500:
+                last = InferenceError(BAD_RESPONSE, f"server error HTTP {resp.status_code}")
+            elif resp.status_code >= 400:
+                raise InferenceError(BAD_RESPONSE, f"HTTP {resp.status_code}: {resp.text[:200]}")
+            else:
+                try:
+                    text = resp.json()["choices"][0]["message"]["content"]
+                except (ValueError, KeyError, IndexError, TypeError) as e:
+                    raise InferenceError(BAD_RESPONSE, f"unexpected response shape: {e}") from e
+                if os.environ.get("STRIP_THINK", "1") == "1":
+                    text = strip_think(text)
+                return text
+        if i < attempts - 1:
+            time.sleep(_backoff() * 2**i)
+    raise last
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    path = argv[0] if argv else "/prompts/vendor_incident.txt"
+    try:
+        with open(path) as f:
+            prompt = f.read()
+    except OSError as e:
+        print(f"ERROR: cannot read prompt file: {e}", file=sys.stderr)
+        return BAD_RESPONSE
+    try:
+        ensure_model(_model())
+        print(chat(prompt))
+    except InferenceError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return e.exit_code
+    return OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+`client/Dockerfile`:
+
+```dockerfile
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY summarize.py .
+
+RUN useradd --system --uid 10001 --shell /usr/sbin/nologin client
+USER client
+
+# One-shot: run, print the summary, exit with a meaningful code.
+CMD ["python", "summarize.py", "/prompts/vendor_incident.txt"]
+```
+
 ---
 
 ## Chapter 4 — Compose with Model-Aware Healthcheck
@@ -224,6 +386,8 @@ services:
     environment:
       INFERENCE_URL: http://inference-server:11434
       INFERENCE_MODEL: ${LLM_MODEL:-deepseek-r1:1.5b}
+      INFERENCE_TIMEOUT: ${INFERENCE_TIMEOUT:-120}
+      STRIP_THINK: ${STRIP_THINK:-1}
     volumes:
       - ./prompts:/prompts:ro
     read_only: true
@@ -247,8 +411,19 @@ services:
         reservations:
           devices:
             - driver: nvidia
-            - count: all
+              count: all
               capabilities: [gpu]
+```
+
+(`driver`, `count` and `capabilities` belong to **one** device entry. Splitting them into separate `-` items makes two half-defined devices and the GPU request fails.)
+
+### Debug override (`docker-compose.debug.yml`)
+The server publishes no host port by default. The capstone (Chapter 6) runs on the host, so it needs this override:
+```yaml
+services:
+  inference-server:
+    ports:
+      - "127.0.0.1:11434:11434"
 ```
 
 ---
@@ -257,54 +432,99 @@ services:
 
 ### 1. Start the Inference Server:
 
-**Option A — Default (CPU Mode, Works on any host):**
+Run everything from `lab5-inference/`. Set `COMPOSE_FILE` once per terminal so every later `docker compose` command uses the same files (otherwise `docker compose run` recreates the server with a different config):
+
+**Option A — Default (CPU Mode, Works on any host, e.g. Poridhi):**
 ```bash
+cd lab5-inference
+export COMPOSE_FILE=docker-compose.yml:docker-compose.debug.yml
 docker compose up -d --build --wait
+docker compose ps
 ```
 
 **Option B — NVIDIA GPU Passthrough (Requires NVIDIA GPU + NVIDIA Container Toolkit):**
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build --wait
+export COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml:docker-compose.debug.yml
+docker compose up -d --build --wait
 ```
 
-The `--wait` flag pauses until `inference-server` finishes pulling the model and reports `(healthy)`.
+The `--wait` flag pauses until `inference-server` finishes pulling the model and reports `(healthy)`. `docker-compose.debug.yml` only adds `127.0.0.1:11434`; it is needed for the capstone and for `curl`, not for the client container.
+
+![Inference server built and healthy](./assets/l5_poridhi_server_startup.png)
+
+![docker compose ps shows the server healthy](./assets/l5_server_startup_healthy.png)
 
 ### 2. Run the Summarization Task:
 ```bash
 docker compose run --rm inference-client
+echo $?        # 0 ok | 2 unreachable | 3 model missing | 4 bad response
 ```
+
+![Client summarizing the vendor incident](./assets/l5_client_summarize_proof.png)
 
 ### 3. Verify Hardware Acceleration:
 ```bash
 sh scripts/check_gpu.sh
 ```
-Shows whether the model was loaded into `100% GPU` (CUDA) or `100% CPU`.
+Shows whether the model was loaded into `100% GPU` (CUDA) or `100% CPU`. On a host without an NVIDIA GPU (Poridhi, laptops with integrated graphics) `100% CPU` is the expected, correct result for Option A.
+
+![GPU check: 100% CPU on a host without NVIDIA GPU](./assets/l5_gpu_check_proof.png)
 
 ### 4. Running Unit Tests (Without Docker):
 ```bash
-pip install requests
-python -m unittest discover -s tests -v
+pip3 install --break-system-packages requests==2.32.3   # or use a venv
+python3 -m unittest discover -s tests -v
 ```
+29 tests: client (mock OpenAI server), entrypoint/healthcheck logic, and the capstone's parsing of DeepSeek output.
+
+![Unit tests passing](./assets/l5_unit_tests_proof.png)
 
 ---
 
-## Chapter 6 — The Capstone: Complete Autonomous Agent Loop
+## Chapter 6 — The Capstone: One Agent Step Across All Three Labs
 
-Connect all three labs: **L3 (Atomic State & Queue) + L4 (Containerized MCP Tools with Bearer Auth) + L5 (Local DeepSeek Reasoning)**.
+The capstone (`capstone/agent_loop.py`) runs one agent step that really uses all three labs:
 
-Run the capstone loop:
-```bash
-# Terminal 1: L4 MCP Server is running on port 8080
-# Terminal 2: L5 Ollama Server is running on port 11434
-
-python capstone/agent_loop.py
-```
+| Lab | What the capstone uses |
+|---|---|
+| L3 | `agent-stack/memory.py` + `storage.py`: the step is recorded as a run-scoped task with atomic writes, so a finished step is skipped when you run it again (state in `capstone/memory/state.json`) |
+| L4 | The MCP-style tool service: `GET /tools` discovery and `POST /tools/<name>`, with the Bearer token from the repo-root `.env` |
+| L5 | Local DeepSeek-R1 over `/v1/chat/completions`: it chooses the tool + arguments and writes the operator summary |
 
 Execution stages:
-1. **Tool Discovery:** Queries L4 MCP Tool Service (`GET /tools`) with Bearer token.
-2. **LLM Decision:** DeepSeek-R1 analyzes schema, reasons through the goal, and selects `fetch_vendor_status`.
-3. **Tool Execution:** Executes tool on MCP Server (`POST /tools/fetch_vendor_status`).
-4. **Executive Synthesis:** Generates a clean operational summary for human operators.
+1. **Tool Discovery (L4):** `GET /tools` with Bearer token.
+2. **LLM Decision (L5):** DeepSeek-R1 reads the schemas and answers `{"tool": ..., "args": {...}}`. The answer is checked against the discovered schema (known tool, required args, no extra args). If the reasoning was cut off or the tool/args are invalid, the model is asked again with the error as feedback (up to 3 attempts).
+3. **Tool Execution (L4):** `POST /tools/<name>`.
+4. **Executive Synthesis (L5):** one-sentence summary for operators.
+5. **State (L3):** saved as `done`, or `failed` if the tool reported `ok: false`.
+
+Exit codes: `0` ok | `1` the tool ran but reported failure | `2` tool service or model server unreachable / token rejected | `3` the model never produced a valid tool call.
+
+### Run it
+Both services must be reachable from the host, so both use their debug overrides:
+
+```bash
+# Terminal 1 — repo root: L4 tool service on 127.0.0.1:8080
+export COMPOSE_FILE=docker-compose.yml:docker-compose.debug.yml
+docker compose up -d --wait
+
+# Terminal 2 — lab5-inference/: L5 model on 127.0.0.1:11434 (Chapter 5, step 1)
+cd lab5-inference
+export COMPOSE_FILE=docker-compose.yml:docker-compose.debug.yml
+docker compose up -d --wait
+
+# Run the capstone (from lab5-inference/; reads MCP_TOKEN from ../.env)
+python3 capstone/agent_loop.py
+echo $?
+```
+
+On CPU each DeepSeek call takes roughly 20 seconds to 2 minutes, because R1 "thinks" before it answers. That's why the capstone allows 2048 tokens and a 300 s timeout (`CAPSTONE_MAX_TOKENS`, `INFERENCE_TIMEOUT`).
+
+Run it a second time: the step is skipped (`already done in run ...`), because L3 state persisted it. Use `RUN_ID=demo-2 python3 capstone/agent_loop.py` to force a fresh run. Change the task with `CAPSTONE_TASK="Check current status for vendor B"`.
+
+> If httpbin.org answers 502/503, the tool returns `ok: false`, the summary says so, the state is `failed`, and the exit code is `1`. That is the correct, honest behaviour; rerun later or set `VENDOR_API_URL` in the repo-root `.env` (see Lab 4).
+
+![Capstone run: L3 + L4 + L5](./assets/l5_capstone_run.png)
 
 ---
 

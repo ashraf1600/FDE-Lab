@@ -25,7 +25,7 @@ By the end of this lab you'll have:
 
 ## The workspace layout
 
-You are building directly on top of the resilient components designed in L3 (`storage.py`, `memory.py`, `job_queue.py`). Here is the complete architecture layout:
+You are building directly on top of the resilient components designed in L3 (`storage.py`, `memory.py`, `job_queue.py`, copied unchanged from `lab3-agent-stack/`). In this repo the L4 version lives in `agent-stack/`; the L3 version stays in `lab3-agent-stack/` so both labs keep working. Here is the complete architecture layout:
 
 ```
 agent-stack/                          # Orchestrator client & local durability
@@ -59,6 +59,7 @@ tests/                                # 16 automated resiliency & unit tests
 └── test_integration.py               # Real HTTP servers + OS process hard-kill crash tests
 
 docker-compose.yml                    # Multi-container orchestration with security profiles
+docker-compose.debug.yml              # Optional: publish mcp-server on 127.0.0.1:8080 for curl / Lab 5 capstone
 .env.example                          # Environment variable template (MCP_TOKEN, APP_VERSION)
 .dockerignore                         # Global Docker build exclusion rules
 ```
@@ -96,6 +97,14 @@ Update your `.env` file with the generated token:
 MCP_TOKEN=your_generated_secret_token_here
 APP_VERSION=0.2.0
 ```
+
+One-liner for Linux (Poridhi VS Code terminal) that does both steps:
+
+```bash
+printf 'MCP_TOKEN=%s\nAPP_VERSION=0.2.0\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" > .env
+```
+
+Optional: `VENDOR_API_URL` (default `https://httpbin.org/get`) is the vendor API the `fetch_vendor_status` tool calls. httpbin.org is a public demo service that sometimes answers 502/503; set `VENDOR_API_URL=<any URL that returns 200>` in `.env` if it is flaky.
 
 > [!IMPORTANT]
 > The `.env` file contains runtime secrets and is listed in `.gitignore`. Never commit `.env` into source control.
@@ -654,6 +663,8 @@ services:
         APP_VERSION: ${APP_VERSION:-dev}
     environment:
       MCP_TOKEN: ${MCP_TOKEN:?set MCP_TOKEN in .env}
+      VENDOR_API_URL: ${VENDOR_API_URL:-https://httpbin.org/get}
+    # No host port on purpose; docker-compose.debug.yml publishes one for debugging.
     read_only: true
     tmpfs:
       - /tmp
@@ -689,13 +700,26 @@ volumes:
   agent_data:
 ```
 
+### 6.3 Debug override (`docker-compose.debug.yml`)
+Because `mcp-server` publishes no host port, `curl http://localhost:8080` from your terminal cannot reach it. For debugging (and for the Lab 5 capstone, which runs on the host) add this override, which binds the port to `127.0.0.1` only:
+
+`docker-compose.debug.yml`:
+
+```yaml
+services:
+  mcp-server:
+    ports:
+      - "127.0.0.1:8080:8080"
+```
+
 ---
 
 ## Chapter 7 — Comprehensive Automated Testing Suite (16 Tests)
 
-Before deploying container images, execute the automated test suite. The suite tests all layers without requiring Docker daemon access:
+Before deploying container images, execute the automated test suite from the repo root. The suite tests all layers without requiring Docker daemon access or internet:
 
 ```bash
+pip3 install --break-system-packages flask==3.0.3 requests==2.32.3   # or use a venv
 python3 -m unittest discover -s tests -v
 ```
 
@@ -730,6 +754,8 @@ Ran 16 tests in 7.576s
 OK
 ```
 
+![16 automated tests passing](./assets/l4_unit_tests.png)
+
 ---
 
 ## Chapter 8 — Run and Verify with Docker Compose
@@ -742,36 +768,42 @@ docker compose --profile job build
 ```
 
 ### 8.2 Start the Tool Service
-Launch the background tool service and confirm its readiness probe succeeds:
+Launch the tool service with the debug override (so you can curl it from the terminal) and confirm the image's `HEALTHCHECK` reports healthy. Set `COMPOSE_FILE` once in the terminal so every later `docker compose` command uses the same two files. Otherwise a plain `docker compose run` sees a different config and silently recreates `mcp-server` without the host port:
 
 ```bash
-docker compose up -d
+export COMPOSE_FILE=docker-compose.yml:docker-compose.debug.yml
+docker compose up -d --wait
 docker compose ps
+docker compose logs mcp-server | tail -5
 ```
 
-Or when running locally for development:
+`mcp-server` shows `(healthy)` and the log shows gunicorn listening on `0.0.0.0:8080` with 2 workers.
+
+Or when running locally on Windows without Docker (development only, Flask dev server):
 ```powershell
 $env:MCP_TOKEN = (Get-Content .env | Where-Object { $_ -match '^MCP_TOKEN=(.+)' } | ForEach-Object { $matches[1] })
 python mcp-server/server.py
 ```
 
-The server initializes on port 8080 and verifies incoming requests against the configured Bearer token:
-
 ![MCP Server Startup & Authenticated Traffic Proof](./assets/l4_mcp_server_startup.png)
 
-### 8.3 Verify Tool Discovery Endpoint
-Query the tool catalog with your Bearer token:
-
-**In PowerShell (Clean 2-space indentation):**
-```powershell
-$token = (Get-Content .env | Where-Object { $_ -match '^MCP_TOKEN=(.+)' } | ForEach-Object { $matches[1] })
-(Invoke-RestMethod -Uri http://127.0.0.1:8080/tools -Headers @{ Authorization = "Bearer $token" } | ConvertTo-Json -Depth 5 -Compress) | python -m json.tool --indent 2
-```
+### 8.3 Verify Tool Discovery Endpoint and Auth
+Query the tool catalog with and without your Bearer token:
 
 **In Bash:**
 ```bash
-TOKEN=$(grep MCP_TOKEN .env | cut -d '=' -f2)
-curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/tools | jq .
+TOKEN=$(grep '^MCP_TOKEN=' .env | cut -d '=' -f2-)
+curl -s http://127.0.0.1:8080/health; echo
+curl -s -o /dev/null -w "without token -> HTTP %{http_code}\n" http://127.0.0.1:8080/tools
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/tools | python3 -m json.tool
+```
+
+`/health` needs no token, `/tools` without a token returns `401`, and with the token returns the JSON schemas. (`python3 -m json.tool` is used instead of `jq` because `jq` is often not installed.)
+
+**In PowerShell (local, no Docker):**
+```powershell
+$token = (Get-Content .env | Where-Object { $_ -match '^MCP_TOKEN=(.+)' } | ForEach-Object { $matches[1] })
+(Invoke-RestMethod -Uri http://127.0.0.1:8080/tools -Headers @{ Authorization = "Bearer $token" } | ConvertTo-Json -Depth 5 -Compress) | python -m json.tool --indent 2
 ```
 
 The tool service responds with HTTP 200 and publishes strict JSON Schemas for each registered tool:
@@ -779,63 +811,66 @@ The tool service responds with HTTP 200 and publishes strict JSON Schemas for ea
 ![MCP Tool Discovery Schema Response Proof](./assets/l4_mcp_tools_discovery.png)
 
 ### 8.4 Seed the Work Queue
-Seed the job queue inside the environment:
+Seed the job queue into the `agent_data` volume:
 
-**With Docker Compose:**
 ```bash
 docker compose run --rm agent python seed_queue.py
 ```
 
-**Or directly against the running Tool Service:**
-```powershell
-python agent-stack/seed_queue.py
-```
-
 ### 8.5 Execute the Nightly One-Shot Job
-Run the batch job container:
+Run the batch job container and check its exit code:
 
-**With Docker Compose:**
 ```bash
 docker compose run --rm agent
+echo $?
 ```
+Exit code `0` = all tasks done, `1` = some task still failed after retries (for example httpbin.org returned 502), `2` = tool service unusable (no state touched). Running it again resumes: `done` tasks are skipped and `failed` ones are retried.
 
-**Or directly in PowerShell:**
+**Or directly in PowerShell (local, no Docker):**
 ```powershell
 $env:MCP_URL = "http://127.0.0.1:8080"
 $env:MCP_TOKEN = (Get-Content .env | Where-Object { $_ -match '^MCP_TOKEN=(.+)' } | ForEach-Object { $matches[1] })
+python agent-stack/seed_queue.py
 python agent-stack/orchestrator.py
-```
-
-Check the job return code:
-```bash
-# In Bash:
-echo $?
-# In PowerShell:
 $LASTEXITCODE
 ```
-A return code of `0` indicates all queue tasks succeeded.
 
-The orchestrator dynamically dispatches status and manifest tasks to the MCP Tool Service, successfully completing all 4 tasks and atomically recording state:
+The orchestrator dispatches status and manifest tasks to the tool service, completing all 4 tasks and atomically recording state:
 
 ![Orchestrator Batch Run Execution Proof](./assets/l4_orchestrator_batch_run.png)
 
-### 8.6 Inspect Persisted State & Execution Logs
-Verify that state survived in the Docker named volume:
+### 8.6 Prove crash recovery inside containers
+The L3 guarantee must survive containerization. Kill the agent container hard after one task (`os._exit(137)`), then run it again with the same `RUN_ID`. State lives in the `agent_data` volume, not in the container:
+
+```bash
+docker compose run --rm -e RUN_ID=crash-test -e CRASH_AFTER=1 agent; echo "exit=$?"
+docker compose run --rm -e RUN_ID=crash-test agent; echo "exit=$?"
+```
+
+Run 1 exits `137` after `vendor-a`; run 2 skips `vendor-a (already done in run crash-test)`, finishes the rest, and exits `0`.
+
+![Crash recovery inside containers](./assets/l4_crash_recovery_docker.png)
+
+### 8.7 Inspect Persisted State, Logs & Hardening
 
 ```bash
 docker compose run --rm agent cat /data/logs/run.log
 docker compose run --rm agent cat /data/state.json
+docker compose run --rm agent id                 # uid=10001(agent), not root
+docker compose exec mcp-server id                # uid=10001(mcp), not root
+docker volume ls | grep agent_data
 ```
 
 Notice:
 - Each task status is recorded as `"done"` with its execution timestamp and return payload.
 - Repeating `docker compose run --rm agent` immediately finishes with all tasks skipped (`already done in run`).
 
-### 8.7 Tear Down
-Stop the services while preserving the named volume:
+### 8.8 Tear Down
+Stop the services while preserving the named volume (state survives; `down -v` would delete it):
 
 ```bash
 docker compose down
+docker volume ls | grep agent_data
 ```
 
 ---

@@ -5,3 +5,11 @@ tests/
 *.md
 **/__pycache__/
 *.pyc
+assets/
+lab3-agent-stack/
+lab5-inference/
+*.zip
+agent-stack/memory/
+agent-stack/logs/
+memory/
+logs/

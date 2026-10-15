@@ -32,4 +32,18 @@
 | healthcheck মডেল নামার আগেই পাস করে                      | client 404 পায়                                                            | মডেল-সচেতন healthcheck ✅                                             |
 | 7b-তে "নিজে pull হয়" ভুল                                       | আসলে 404 আসে                                                            | client স্পষ্ট pull নির্দেশ দেয় ✅                            |
 | air-gapped দাবি, অথচ চালুর সময় ইন্টারনেট লাগে | নিজের উদ্দেশ্যের সাথে বিরোধ                            | `PULL_ON_START=0` offline মোড (বাস্তবে যাচাই হয়নি) ⚠️ |
-| মডেল orchestrator-এর সাথে জোড়া নেই                       | তিন ল্যাব আলাদা ডেমো                                          | ❌ করা হয়নি                                                           |
+| মডেল orchestrator-এর সাথে জোড়া নেই                       | তিন ল্যাব আলাদা ডেমো                                          | capstone/agent_loop.py: L3 state + L4 tools + L5 মডেল একসাথে, তবে একটি টাস্কের ডেমো; nightly orchestrator-এ LLM নেই ⚠️ |
+
+## ২০২৬-১০-১৫ রিভিউতে পাওয়া ও ঠিক করা সমস্যা
+
+| সমস্যা | প্রভাব | এখন |
+|---|---|---|
+| L3 `.md`-এর কোড আসল কোডের সাথে মেলে না (`storage.py` নেই, `CRASH_AFTER` নেই) | `.md` অনুসরণ করলে `simulate_crash.py` ImportError দেয়, L4 ভেঙে যায় | `.md`-তে আসল কোড, যাচাই করা ✅ |
+| `agent-stack/` এখন L4, তাই `test_stack.py` (L3) সেখানে ফেল করে (৫ error, ১ fail) | L3 টেস্ট চালানো যায় না | L3 কোড `lab3-agent-stack/`-এ ✅ (`agent-stack/test_stack.py` git rm করতে হবে) |
+| `simulate_crash.py` আজকের রান শেষ হলে crash-ই করে না (exit 0) | ক্র্যাশ ডেমো কিছু প্রমাণ করে না | নিজস্ব `crash-demo-<time>` RUN_ID ✅ |
+| L4: `docker compose up`-এর পর `curl localhost:8080` চলে না (port নেই) | Chapter 8.3 ব্যর্থ | `docker-compose.debug.yml` + `COMPOSE_FILE` ✅ |
+| L4: mcp-server-এ `VENDOR_API_URL` যায় না | httpbin.org 502 দিলে বিকল্প নেই | compose-এ যোগ ✅ |
+| Capstone: `Discovered Tools: ['tools']` | ভুল parsing | ঠিক ✅ |
+| Capstone: টুল `ok: false` হলেও "SUCCESS" | মিথ্যা সফলতা | সৎ exit code (0/1/2/3) ✅ |
+| Capstone: `<think>` কেটে গেলে বা ভুল টুল নাম দিলে traceback | 1.5b মডেলে প্রায়ই ঘটে | schema যাচাই + ৩ বার retry ✅ |
+| L5 `.md`-এ GPU yaml ভুল (`- count: all` আলাদা item) | কপি করলে GPU কাজ করবে না | ঠিক ✅ |

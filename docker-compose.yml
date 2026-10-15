@@ -7,6 +7,10 @@ services:
         APP_VERSION: ${APP_VERSION:-dev}
     environment:
       MCP_TOKEN: ${MCP_TOKEN:?set MCP_TOKEN in .env}
+      # The vendor API the fetch_vendor_status tool calls. httpbin.org is a
+      # public demo service and sometimes answers 502/503; point this at any
+      # URL that returns HTTP 200 if it is flaky.
+      VENDOR_API_URL: ${VENDOR_API_URL:-https://httpbin.org/get}
     # No host port on purpose: only the agent needs it. For debugging add
     # `ports: ["127.0.0.1:8080:8080"]` in a docker-compose.override.yml.
     read_only: true

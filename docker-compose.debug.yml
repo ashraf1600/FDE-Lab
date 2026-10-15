@@ -1,0 +1,7 @@
+# Expose the tool service on the host (localhost only) for curl / debugging
+# and for the Lab 5 capstone. Production keeps NO host port.
+#   docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d
+services:
+  mcp-server:
+    ports:
+      - "127.0.0.1:8080:8080"

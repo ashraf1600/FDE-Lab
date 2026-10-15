@@ -1,5 +1,5 @@
 # FDE Lab Progress & State Tracker
-**Last Updated:** 2026-10-15 (Local Time)
+**Last Updated:** 2026-10-15 (review + fixes, see `lab_critical_issues.md`)
 
 ---
 
@@ -7,9 +7,9 @@
 
 | Lab | Title | Status | Embedded Screenshots |
 |---|---|---|---|
-| **Lab 3** | Composing the Agent Stack: Orchestrator, Tools, Memory & Queue | **100% COMPLETE** ✅ | 4 / 4 Complete |
-| **Lab 4** | Packaging MCP Servers as Containerized Services | **100% COMPLETE** ✅ | 3 / 3 Complete |
-| **Lab 5** | Local Inference Sidecars: Serving DeepSeek with GPU Passthrough | **IN PROGRESS (Code Synchronized & Ready)** ⏳ | 0 / 2 Pending Execution Proofs |
+| **Lab 3** | Composing the Agent Stack: Orchestrator, Tools, Memory & Queue | **Code + md fixed** ✅ (code now in `lab3-agent-stack/`) | 4 / 4 (retake on Poridhi recommended) |
+| **Lab 4** | Packaging MCP Servers as Containerized Services | **Docker flow fixed** ✅ | 3 / 3 were local Windows (no Docker); retake with Docker on Poridhi |
+| **Lab 5** | Local Inference Sidecars: Serving DeepSeek with GPU Passthrough | **Server/client done on Poridhi; capstone fixed** ⏳ | 5 embedded; capstone screenshot pending |
 
 ---
 

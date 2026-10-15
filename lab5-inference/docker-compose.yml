@@ -38,6 +38,8 @@ services:
     environment:
       INFERENCE_URL: http://inference-server:11434
       INFERENCE_MODEL: ${LLM_MODEL:-deepseek-r1:1.5b}
+      INFERENCE_TIMEOUT: ${INFERENCE_TIMEOUT:-120}
+      STRIP_THINK: ${STRIP_THINK:-1}
     volumes:
       - ./prompts:/prompts:ro
     read_only: true
