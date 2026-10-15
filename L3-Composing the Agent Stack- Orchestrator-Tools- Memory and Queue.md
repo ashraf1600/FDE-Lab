@@ -8,6 +8,8 @@ By the end you'll have a working agent stack where any component can crash and t
 
 ![architecture](https://raw.githubusercontent.com/poridhiEng/lab-asset/c38754d6674690f553cd68661e10446d84526910/Forward%20Deployed%20Engineering/Milestone%201/MDL-6%20Docker%20and%20Kubernetes%20in%20Agentic%20Workflows/Containerized%20Agent%20Runtimes/lab03/architecture.svg)
 
+> **Verified on Poridhi (2026-10-16):** all four screenshots in this lab were taken in the Poridhi cloud VS Code (code-server, Ubuntu, Python 3.12.3) from a fresh `git clone`, with the real httpbin.org vendor API. Timestamps in the output are UTC, so the default `run_id` shows the UTC date. In every screenshot, **red boxes** mark the command that was run and the output lines the text below refers to.
+
 > **Where the code lives in this repo:** the finished Lab 3 code is in `lab3-agent-stack/`. The `agent-stack/` folder was upgraded in Lab 4 (its `tools.py` became an HTTP client), so Lab 3's tests and crash demo do **not** run from `agent-stack/`. Run every Lab 3 command from `lab3-agent-stack/`.
 
 ---
@@ -408,12 +410,15 @@ if __name__ == "__main__":
 
 `CRASH_AFTER` is a test hook used by the crash demo in Chapter 7: after N tasks the process kills itself with `os._exit(137)`, the same as `kill -9`, with no cleanup.
 
-Run it:
+Run it (seed first, then the orchestrator, then print the exit code):
 
 ```bash
-python3 orchestrator.py
-echo $?        # 0 = every task done, 1 = some task still failed
+python3 seed_queue.py && python3 orchestrator.py; echo "exit=$?"
 ```
+
+Exit code `0` = every task done, `1` = some task still failed after 3 attempts.
+
+The screenshot shows `Seeded 3 tasks`, each vendor going `Processing` then `Completed ... 'ok': True` against the real httpbin.org, `finished: {'done': 3}` and `exit=0`:
 
 ![Orchestrator Execution Proof](./assets/l3_orchestrator_run.png)
 
@@ -427,7 +432,13 @@ Before testing crash recovery in live workflows, run the automated test suite `t
 python3 -m unittest test_stack -v
 ```
 
-All 8 architectural tests pass, confirming zero state loss or duplicated execution:
+The tests that run the orchestrator print its log lines to stdout, mixed in with the test report. For a clean screenshot, hide stdout (the unittest report goes to stderr, so it stays visible):
+
+```bash
+python3 -m unittest test_stack -v > /dev/null
+```
+
+All 8 tests show `... ok`, then `Ran 8 tests` and `OK`, confirming no state loss and no duplicated work:
 
 ![Automated Resiliency & Unit Test Verification](./assets/l3_unit_resiliency_tests.png)
 
@@ -479,7 +490,7 @@ Run the real crash simulation:
 python3 simulate_crash.py
 ```
 
-Notice: Run 1 dies hard after `vendor-a` with `exit code: 137`. The state on disk preserves `vendor-a: done`. On run 2, the orchestrator resumes, skips `vendor-a` (`already done in run ...`), completes `vendor-b` and `vendor-c`, and exits with code `0`:
+Notice: run 1 of `crash-demo-<timestamp>` completes `vendor-a`, prints `CRASH HOOK: dying hard after 1 task(s)` and exits with `137`. The state on disk shows only `"vendor-a": "done"`. Run 2 starts with `state so far {'done': 1}`, prints `Skipping vendor-a (already done in run crash-demo-...)`, completes `vendor-b` and `vendor-c`, ends with `finished: {'done': 3}` and exits `0`:
 
 ![Crash Recovery and Retry Verification](./assets/l3_crash_recovery_proof.png)
 
@@ -494,7 +505,13 @@ cat memory/state.json
 ls memory/history/
 ```
 
-`state.json` holds the latest run (the `crash-demo-...` run from Chapter 7) with every vendor `"done"`. The earlier run from Chapter 5 was archived to `memory/history/<run_id>.json` instead of being overwritten:
+The full `state.json` is taller than one screen, so the screenshot uses a compact view of the same file:
+
+```bash
+echo '== archived runs:'; ls -1 memory/history/; echo '== memory/state.json:'; grep -E 'run_id|"vendor-.": \{|status|attempts' memory/state.json
+```
+
+`state.json` holds the latest run (`crash-demo-...` from Chapter 7) with every vendor `"status": "done"` and `"attempts": 1` (nothing ran twice). Earlier runs were archived to `memory/history/<run_id>.json` instead of being overwritten: the screenshot lists today's normal run (`2026-10-15.json`, UTC date) and an earlier crash demo:
 
 ![Final Persisted State Proof](./assets/l3_state_json_proof.png)
 

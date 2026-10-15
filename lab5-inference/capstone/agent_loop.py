@@ -108,10 +108,25 @@ def check_call(call, tools):
     missing = [k for k in schema.get("required", []) if k not in args]
     if missing:
         return f"missing required args {missing} for {name}"
-    extra = [k for k in args if k not in schema.get("properties", {})]
+    props = schema.get("properties", {})
+    extra = [k for k in args if k not in props]
     if extra and schema.get("additionalProperties") is False:
         return f"unexpected args {extra} for {name}"
+    # Same type rules as the tool service, so a bad type is retried with
+    # feedback instead of failing as HTTP 400 (seen with deepseek-r1:1.5b:
+    # {"vendor_id": ["A"]} instead of {"vendor_id": "A"}).
+    for key, value in args.items():
+        expected = _JSON_TYPES.get(props.get(key, {}).get("type"))
+        if expected and (not isinstance(value, expected) or
+                         (expected is not bool and isinstance(value, bool))):
+            return f"arg {key!r} must be a JSON {props[key]['type']}, got {json.dumps(value)}"
     return None
+
+
+_JSON_TYPES = {
+    "string": str, "array": list, "object": dict,
+    "boolean": bool, "integer": int, "number": (int, float),
+}
 
 
 # ---------- L4: tool service ----------
@@ -163,31 +178,123 @@ def ask_model(prompt, max_tokens=MAX_TOKENS, temperature=0.0):
     return resp.json()["choices"][0]["message"]["content"]
 
 
-def plan(task, tools):
-    """Ask the model for {"tool": ..., "args": {...}}, retrying with feedback."""
-    catalog = [
-        {"name": n, "description": t["description"], "input_schema": t["input_schema"]}
+_PLACEHOLDER = {"string": "<string>", "array": ["<item>"], "object": {},
+                "boolean": "<true|false>", "integer": "<integer>", "number": "<number>"}
+
+
+def call_template(name, schema):
+    """{"tool": name, "args": {arg: <type placeholder>}} for one tool."""
+    args = {k: _PLACEHOLDER.get(v.get("type"), "<value>")
+            for k, v in schema.get("properties", {}).items()}
+    return json.dumps({"tool": name, "args": args})
+
+
+def _bounded(schema, max_len=64):
+    """Copy of a JSON schema with a maxLength on every string.
+
+    Under constrained decoding a small model can keep writing one string until
+    the token limit, which leaves unterminated JSON (seen on Poridhi).
+    """
+    if isinstance(schema, dict):
+        out = {k: _bounded(v, max_len) for k, v in schema.items()}
+        if out.get("type") == "string" and "enum" not in out:
+            out.setdefault("maxLength", max_len)
+        return out
+    if isinstance(schema, list):
+        return [_bounded(v, max_len) for v in schema]
+    return schema
+
+
+def tool_call_schema(tools):
+    """JSON schema that only allows {"tool": <one of tools>, "args": <its args>}."""
+    return {"anyOf": [
+        {"type": "object",
+         "properties": {"tool": {"type": "string", "enum": [n]}, "args": _bounded(t["input_schema"])},
+         "required": ["tool", "args"]}
         for n, t in sorted(tools.items())
-    ]
+    ]}
+
+
+def ask_model_structured(prompt, schema):
+    """Ollama structured output (native /api/chat "format", Ollama >= 0.5).
+
+    Decoding is constrained to the schema, so the JSON shape is always valid.
+    It also switches off R1's free-form reasoning, so it is only used to fill
+    arguments for a tool the model already chose. Returns None if unsupported.
+    """
+    body = {"model": MODEL, "messages": [{"role": "user", "content": prompt}],
+            "stream": False, "format": schema,
+            "options": {"temperature": 0, "num_predict": 300}}
+    try:
+        resp = requests.post(f"{INFERENCE_URL}/api/chat", json=body, timeout=(5, LLM_TIMEOUT))
+    except requests.RequestException as e:
+        raise CapstoneError(UNREACHABLE, f"model server unreachable at {INFERENCE_URL}: {e}") from e
+    if resp.status_code != 200:
+        return None
+    return resp.json().get("message", {}).get("content")
+
+
+def chosen_tool(answer, tools):
+    """The tool named first in the model's final answer (after <think>), or None."""
+    hits = [(answer.find(n), n) for n in tools if n in answer]
+    return min(hits)[1] if hits else None
+
+
+def plan(task, tools):
+    """Reason, then structure.
+
+    1. DeepSeek reasons freely (<think>) and names ONE tool. A short answer
+       finishes reliably on a slow CPU, and free reasoning picks the right tool.
+    2. Ollama structured output, locked to that one tool's schema, fills its
+       arguments, so the JSON shape cannot be wrong.
+
+    Why: on Poridhi the 1.5b model picked the right tool when reasoning but got
+    the JSON wrong ({"vendor_id": ["A"]}); with constrained decoding alone it
+    produced valid JSON but picked the wrong tool. Every call is still checked
+    against the discovered schema before it runs.
+    """
+    tool_lines = "\n".join(
+        f"- {n}: {t['description']} (args: "
+        + ", ".join(f"{k}: {v.get('type')}" for k, v in t["input_schema"].get("properties", {}).items())
+        + ")"
+        for n, t in sorted(tools.items())
+    )
     feedback = ""
     for attempt in range(1, LLM_ATTEMPTS + 1):
-        prompt = (
+        answer = strip_think(ask_model(
             "You are an autonomous logistics agent.\n"
             f"Task: {task}\n"
-            f"Available tools (JSON schema): {json.dumps(catalog)}\n\n"
-            "Respond ONLY with one JSON object: "
-            '{"tool": "<tool_name>", "args": {...}}\n'
-            "Use exactly the argument names from input_schema. No explanation."
+            f"Tools:\n{tool_lines}\n\n"
+            "Which ONE tool should be called for this task? Answer with the tool name only."
             f"{feedback}"
-        )
-        answer = strip_think(ask_model(prompt))
+        ))
+        # If the model already wrote a valid full call, use it as is.
         call = extract_tool_call(answer)
-        problem = "no JSON tool call in the answer" if call is None else check_call(call, tools)
-        if problem is None:
+        if call is not None and check_call(call, tools) is None:
             call.setdefault("args", {})
-            return call, attempt
+            return call, f"{attempt}, model wrote the full call"
+        tool = chosen_tool(answer, tools)
+        if tool is None:
+            problem = f"no tool name in the answer {answer[:80]!r}"
+        else:
+            filled = ask_model_structured(
+                f"Task: {task}\n"
+                f"Tool: {tool}: {tools[tool]['description']}\n"
+                "Fill in this tool's arguments with values taken from the task.",
+                tool_call_schema({tool: tools[tool]}),
+            )
+            if filled is None:
+                problem = "server does not support structured output (needs Ollama >= 0.5)"
+            else:
+                try:
+                    call = json.loads(filled)
+                    problem = check_call(call, tools) if isinstance(call, dict) else "not a JSON object"
+                except ValueError:
+                    problem = f"structured output was not JSON: {filled[:80]!r}"
+                if problem is None:
+                    return call, f"{attempt}, chose {tool} by reasoning, args by structured output"
         print(f"    attempt {attempt}/{LLM_ATTEMPTS} rejected: {problem}")
-        feedback = f"\n\nYour previous answer was invalid ({problem}). Try again."
+        feedback = f"\n\nYour previous answer was not usable ({problem}). Answer with one tool name."
     raise CapstoneError(NO_VALID_PLAN, f"model gave no valid tool call in {LLM_ATTEMPTS} attempts")
 
 

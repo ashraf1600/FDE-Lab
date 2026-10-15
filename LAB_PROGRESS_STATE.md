@@ -7,9 +7,9 @@
 
 | Lab | Title | Status | Embedded Screenshots |
 |---|---|---|---|
-| **Lab 3** | Composing the Agent Stack: Orchestrator, Tools, Memory & Queue | **Code + md fixed** ✅ (code now in `lab3-agent-stack/`) | 4 / 4 (retake on Poridhi recommended) |
-| **Lab 4** | Packaging MCP Servers as Containerized Services | **Docker flow fixed** ✅ | 3 / 3 were local Windows (no Docker); retake with Docker on Poridhi |
-| **Lab 5** | Local Inference Sidecars: Serving DeepSeek with GPU Passthrough | **Server/client done on Poridhi; capstone fixed** ⏳ | 5 embedded; capstone screenshot pending |
+| **Lab 3** | Composing the Agent Stack: Orchestrator, Tools, Memory & Queue | **Done on Poridhi** ✅ (`lab3-agent-stack/`) | 4 / 4 retaken on Poridhi 2026-10-16 |
+| **Lab 4** | Packaging MCP Servers as Containerized Services | **Done on Poridhi with Docker** ✅ | 5 / 5 taken on Poridhi 2026-10-16 |
+| **Lab 5** | Local Inference Sidecars: Serving DeepSeek with GPU Passthrough | **Server, client, GPU check done on Poridhi** ✅; capstone ⏳ | 5 taken on Poridhi 2026-10-16 (needed 3 GB swap + longer timeout); unit-test shot shows 29, now 36: retake; capstone success shot pending |
 
 ---
 

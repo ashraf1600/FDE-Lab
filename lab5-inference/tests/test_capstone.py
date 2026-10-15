@@ -49,6 +49,56 @@ class ExtractToolCallTests(unittest.TestCase):
         self.assertIsNone(agent_loop.extract_tool_call("I think vendor A is fine."))
 
 
+class CallTemplateTests(unittest.TestCase):
+    def test_template_shows_string_placeholder(self):
+        t = agent_loop.call_template("fetch_vendor_status", TOOLS["fetch_vendor_status"]["input_schema"])
+        self.assertEqual(t, '{"tool": "fetch_vendor_status", "args": {"vendor_id": "<string>"}}')
+
+
+class PlanTests(unittest.TestCase):
+    def setUp(self):
+        orig = (agent_loop.ask_model, agent_loop.ask_model_structured)
+        self.addCleanup(lambda: setattr(agent_loop, "ask_model", orig[0]))
+        self.addCleanup(lambda: setattr(agent_loop, "ask_model_structured", orig[1]))
+
+    def test_tool_chosen_by_reasoning_args_by_structured_output(self):
+        agent_loop.ask_model = lambda p, **k: "<think>status of a vendor -> fetch</think>fetch_vendor_status"
+        seen = {}
+        def structured(prompt, schema):
+            seen["schema"] = schema
+            return '{"tool": "fetch_vendor_status", "args": {"vendor_id": "A"}}'
+        agent_loop.ask_model_structured = structured
+        call, how = agent_loop.plan("Check vendor A", TOOLS)
+        self.assertEqual(call, {"tool": "fetch_vendor_status", "args": {"vendor_id": "A"}})
+        self.assertIn("by reasoning", how)
+        # Structured output is locked to the tool the model chose.
+        self.assertEqual([b["properties"]["tool"]["enum"] for b in seen["schema"]["anyOf"]],
+                         [["fetch_vendor_status"]])
+
+    def test_valid_full_call_needs_no_structuring(self):
+        agent_loop.ask_model = lambda p, **k: '{"tool": "fetch_vendor_status", "args": {"vendor_id": "A"}}'
+        agent_loop.ask_model_structured = lambda p, s: self.fail("should not be called")
+        call, _ = agent_loop.plan("Check vendor A", TOOLS)
+        self.assertEqual(call["args"], {"vendor_id": "A"})
+
+    def test_truncated_reasoning_retries_then_exit_3(self):
+        agent_loop.ask_model = lambda p, **k: "<think>still thinking about which"
+        agent_loop.ask_model_structured = lambda p, s: self.fail("no tool chosen yet")
+        with self.assertRaises(agent_loop.CapstoneError) as ctx:
+            agent_loop.plan("Check vendor A", TOOLS)
+        self.assertEqual(ctx.exception.code, agent_loop.NO_VALID_PLAN)
+
+    def test_structured_schema_caps_strings(self):
+        schema = agent_loop.tool_call_schema(TOOLS)
+        args = schema["anyOf"][0]["properties"]["args"]
+        self.assertEqual(args["properties"]["vendor_id"]["maxLength"], 64)
+        self.assertNotIn("maxLength", TOOLS["fetch_vendor_status"]["input_schema"]["properties"]["vendor_id"])
+
+    def test_chosen_tool_is_first_named(self):
+        self.assertEqual(agent_loop.chosen_tool("fetch_vendor_status, not flag", TOOLS), "fetch_vendor_status")
+        self.assertIsNone(agent_loop.chosen_tool("no idea", TOOLS))
+
+
 class CheckCallTests(unittest.TestCase):
     def test_valid(self):
         call = {"tool": "fetch_vendor_status", "args": {"vendor_id": "A"}}
@@ -61,6 +111,11 @@ class CheckCallTests(unittest.TestCase):
         self.assertIn("missing", agent_loop.check_call({"tool": "fetch_vendor_status", "args": {}}, TOOLS))
         bad = {"tool": "fetch_vendor_status", "args": {"vendor_id": "A", "x": 1}}
         self.assertIn("unexpected", agent_loop.check_call(bad, TOOLS))
+
+    def test_wrong_type_is_rejected(self):
+        # Real deepseek-r1:1.5b output seen on Poridhi.
+        bad = {"tool": "fetch_vendor_status", "args": {"vendor_id": ["A"]}}
+        self.assertIn("must be a JSON string", agent_loop.check_call(bad, TOOLS))
 
 
 if __name__ == "__main__":

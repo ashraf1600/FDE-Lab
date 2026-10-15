@@ -63,7 +63,7 @@ docker compose down -v     # optional: start from an empty agent_data volume so 
 |---|---|---|---|
 | 1 | `python3 -m unittest discover -s tests -v` | 16 tests, `OK` | `assets/l4_unit_tests.png` |
 | 2 | `docker compose --profile job build` then `docker compose up -d --wait && docker compose ps && docker compose logs mcp-server \| tail -5` | `mcp-server ... (healthy)`, `127.0.0.1:8080->8080`, gunicorn `Listening at: http://0.0.0.0:8080` | `assets/l4_mcp_server_startup.png` |
-| 3 | `TOKEN=$(grep '^MCP_TOKEN=' .env \| cut -d= -f2-)`<br>`curl -s http://127.0.0.1:8080/health; echo`<br>`curl -s -o /dev/null -w "without token -> HTTP %{http_code}\n" http://127.0.0.1:8080/tools`<br>`curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/tools \| python3 -m json.tool \| head -40` | health JSON, `HTTP 401`, then the tool schemas | `assets/l4_mcp_tools_discovery.png` |
+| 3 | `TOKEN=$(sed -n 's/^MCP_TOKEN=//p' .env)` (not grep: Poridhi aliases grep to `--color=always`, which breaks the token)<br>`curl -s http://127.0.0.1:8080/health; echo`<br>`curl -s -o /dev/null -w "without token -> HTTP %{http_code}\n" http://127.0.0.1:8080/tools`<br>`curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/tools \| python3 -m json.tool \| head -40` | health JSON, `HTTP 401`, then the tool schemas | `assets/l4_mcp_tools_discovery.png` |
 | 4 | `docker compose run --rm agent python seed_queue.py`<br>`docker compose run --rm agent; echo "exit=$?"` | `Seeded 4 tasks`, 4 `Completed`, `finished: {'done': 4}`, `exit=0` | `assets/l4_orchestrator_batch_run.png` |
 | 5 | `docker compose run --rm -e RUN_ID=crash-test -e CRASH_AFTER=1 agent; echo "exit=$?"`<br>`docker compose run --rm -e RUN_ID=crash-test agent; echo "exit=$?"` | `CRASH HOOK`, `exit=137`, then `Skipping vendor-a (already done in run crash-test)`, `exit=0` | `assets/l4_crash_recovery_docker.png` |
 
@@ -74,6 +74,20 @@ Optional extra proof (same screenshot or a new one): `docker compose run --rm ag
 ---
 
 ## Lab 5 (folder `lab5-inference/`, Docker, CPU)
+
+**Low-RAM machines (Poridhi default: 1.9 GB RAM, 2 CPUs).** DeepSeek-R1 1.5b needs about 1.7 GB, so the client gets `HTTP 500` and the server log says `model requires more system memory (1.7 GiB) than is available`. Add swap once per machine (Ollama counts swap as memory):
+
+```bash
+sudo fallocate -l 3G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+free -h
+```
+
+Generation is then about 4 tokens/s, so one DeepSeek answer takes 2 to 4 minutes, longer than the client's default 120 s timeout (you'd see `500 | 2m0s` in the server log). Run the client and capstone with longer timeouts:
+
+```bash
+INFERENCE_TIMEOUT=600 docker compose run --rm inference-client
+INFERENCE_TIMEOUT=900 CAPSTONE_MAX_TOKENS=1024 python3 capstone/agent_loop.py
+```
 
 Open a **second terminal**:
 
@@ -87,7 +101,7 @@ Your existing screenshots `l5_poridhi_server_startup.png`, `l5_server_startup_he
 
 | # | Command | You should see | Save as |
 |---|---|---|---|
-| 1 | `python3 -m unittest discover -s tests -v` | **29** tests, `OK` (was 20) | `assets/l5_unit_tests_proof.png` |
+| 1 | `python3 -m unittest discover -s tests -v` | **36** tests, `OK` (was 20) | `assets/l5_unit_tests_proof.png` |
 | 2 | `python3 capstone/agent_loop.py; echo "exit=$?"` | `Discovered tools: [3 names]`, `DeepSeek decided ... fetch_vendor_status({'vendor_id': 'A'})`, `Tool result: {'ok': True ...}`, summary, `[L3] State saved`, `exit=0` | `assets/l5_capstone_run.png` |
 
 The capstone is slow on CPU (each DeepSeek call is 20 s to 2 min). Seeing `attempt 1/3 rejected: ...` before a success is normal for the 1.5b model, and worth having in the screenshot, because it shows the validation working. Run it a second time to show the L3 skip (`already done in run ...`); `RUN_ID=demo-2 python3 capstone/agent_loop.py` forces a fresh run.

@@ -1,5 +1,7 @@
 # Lab 5: Local Inference Sidecars — Serving DeepSeek with GPU Passthrough & CPU Fallback
 
+> **Verified on Poridhi (2026-10-16):** the screenshots in Chapter 5 were taken in the Poridhi cloud VS Code (code-server, Ubuntu, 1.9 GB RAM, 2 vCPU, no GPU, Docker 29.7) from a fresh `git clone`. That machine needed two changes, both documented below: 3 GB of swap (the model needs 1.7 GiB) and a longer client timeout (about 4 tokens/s on 2 vCPUs). The capstone (Chapter 6) was not completed there; see its status note. In every screenshot, **red boxes** mark the command that was run and the output lines the text below refers to.
+
 ## Introduction
 
 An agent loop has three moving parts: the orchestrator that decides what to do, the tools that do it, and the model that powers the reasoning between them. In Labs 3 and 4, our stack used deterministic code to simulate decisions. In this lab, we replace that hardcoded logic with a real, local Large Language Model.
@@ -30,6 +32,11 @@ Before starting Lab 5, verify your host machine resources. Local LLM inference p
 | **VRAM (If using NVIDIA GPU)** | **2 GB VRAM** | **6 - 8 GB VRAM** |
 | **Compute Engine** | **CPU or GPU** (Runs smoothly on 6-core CPU) | **NVIDIA GPU Recommended** (Slow on CPU) |
 | **Total Disk Space Needed (Docker + Cache)** | **~3.5 GB free** | **~8.0 GB free** |
+
+### Small cloud VMs (e.g. Poridhi: 1.9 GB RAM, 2 vCPU)
+Measured on a Poridhi VM: Ollama reports `model requires more system memory (1.7 GiB) than is available (975 MiB)` and every request returns HTTP 500, because code-server, Docker and the editor extensions already use about 1 GB. Two fixes, both verified:
+1. **Add swap** (Ollama counts free swap as memory): `sudo fallocate -l 3G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile`
+2. **Allow for slow generation:** about 4 tokens/s on 2 vCPUs, so R1's reasoning takes 2 to 4 minutes. The default 120 s client timeout cancels the request (server log: `500 | 2m0s`). Use `INFERENCE_TIMEOUT=600 docker compose run --rm inference-client` (compose passes it to the client) and `INFERENCE_TIMEOUT=900 CAPSTONE_MAX_TOKENS=1024 python3 capstone/agent_loop.py`.
 
 ### Host Machine Audit Check:
 - **Processor:** An AMD Ryzen 5 / Intel Core i5 or higher (6 cores / 12 threads) runs `deepseek-r1:1.5b` comfortably on CPU.
@@ -430,6 +437,14 @@ services:
 
 ## Chapter 5 — How to Start Lab 5
 
+### 0. Small machines only: add swap first
+On a machine with less than about 3 GB of free RAM (Poridhi: 1.9 GB total, about 1 GB free), the server starts but every request fails with HTTP 500 and the log says `model requires more system memory (1.7 GiB) than is available`. Ollama counts swap as memory, so add some once per machine:
+
+```bash
+sudo fallocate -l 3G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+free -h        # Swap: 3.0Gi
+```
+
 ### 1. Start the Inference Server:
 
 Run everything from `lab5-inference/`. Set `COMPOSE_FILE` once per terminal so every later `docker compose` command uses the same files (otherwise `docker compose run` recreates the server with a different config):
@@ -450,9 +465,28 @@ docker compose up -d --build --wait
 
 The `--wait` flag pauses until `inference-server` finishes pulling the model and reports `(healthy)`. `docker-compose.debug.yml` only adds `127.0.0.1:11434`; it is needed for the capstone and for `curl`, not for the client container.
 
+The screenshot command combines the start and the status (build output trimmed to the last lines):
+
+```bash
+docker compose up -d --build --wait 2>&1 | tail -6 && docker compose ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}'
+```
+
+On Poridhi the container went `Creating → Started → Waiting → Healthy`, and was `Up 28 seconds (healthy)` on `127.0.0.1:11434`, including the first download of the 1.1 GB model:
+
 ![Inference server built and healthy](./assets/l5_poridhi_server_startup.png)
 
-![docker compose ps shows the server healthy](./assets/l5_server_startup_healthy.png)
+Then confirm the model really is in the named volume and reachable from the host:
+
+```bash
+docker compose logs inference-server 2>&1 | grep -E 'Pulling|already present|Listening|inference compute' | cut -c1-140
+docker compose exec inference-server ollama list
+curl -s http://127.0.0.1:11434/v1/models; echo
+docker volume ls | grep ollama
+```
+
+The log shows Ollama listening on `11434`, `inference compute ... library=cpu` (no GPU) and `Pulling deepseek-r1:1.5b`. `ollama list` shows `deepseek-r1:1.5b` (1.1 GB), `/v1/models` returns it over the OpenAI-compatible API, and the `lab5-inference_ollama_models` volume exists:
+
+![Model present in the volume and served on /v1/models](./assets/l5_server_startup_healthy.png)
 
 ### 2. Run the Summarization Task:
 ```bash
@@ -460,13 +494,29 @@ docker compose run --rm inference-client
 echo $?        # 0 ok | 2 unreachable | 3 model missing | 4 bad response
 ```
 
+On a slow CPU, R1's reasoning takes longer than the default 120 s read timeout: the server log then shows `500 | 2m0s` for every attempt and the client exits `2`. Give it more time (compose passes `INFERENCE_TIMEOUT` to the client):
+
+```bash
+time INFERENCE_TIMEOUT=600 docker compose run --rm inference-client 2>/dev/null; echo "exit=$?"
+```
+
+On Poridhi this took 2 min 6 s and exited `0`. The summary is correct: resolved at 04:02 UTC, 14 shipments delayed with no data loss, root cause an API rate limit on the 03:00 polling job, fix a 10-minute polling cadence with backoff:
+
 ![Client summarizing the vendor incident](./assets/l5_client_summarize_proof.png)
 
 ### 3. Verify Hardware Acceleration:
 ```bash
 sh scripts/check_gpu.sh
 ```
-Shows whether the model was loaded into `100% GPU` (CUDA) or `100% CPU`. On a host without an NVIDIA GPU (Poridhi, laptops with integrated graphics) `100% CPU` is the expected, correct result for Option A.
+
+The screenshot also lists the running containers:
+
+```bash
+sh scripts/check_gpu.sh; docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+```
+Shows whether the model was loaded into `100% GPU` (CUDA) or `100% CPU`. On a host without an NVIDIA GPU (Poridhi, laptops with integrated graphics) `100% CPU` is the expected, correct result for Option A. On Poridhi: `nvidia-smi not found`, `deepseek-r1:1.5b 1.8 GB 100% CPU`, and both stacks running side by side (`lab5-inference-inference-server-1` and the Lab 4 `fde-lab-mcp-server-1`).
+
+> The screenshot shows the inference server's port as plain `11434/tcp` (not published). It was taken from a second terminal where `COMPOSE_FILE` had not been exported, so `docker compose run` recreated the server without the debug override. That is exactly the trap described in step 1. Re-running `export COMPOSE_FILE=...` and `docker compose up -d --wait` restored `127.0.0.1:11434`.
 
 ![GPU check: 100% CPU on a host without NVIDIA GPU](./assets/l5_gpu_check_proof.png)
 
@@ -475,7 +525,13 @@ Shows whether the model was loaded into `100% GPU` (CUDA) or `100% CPU`. On a ho
 pip3 install --break-system-packages requests==2.32.3   # or use a venv
 python3 -m unittest discover -s tests -v
 ```
-29 tests: client (mock OpenAI server), entrypoint/healthcheck logic, and the capstone's parsing of DeepSeek output.
+36 tests: client (mock OpenAI server), entrypoint/healthcheck logic, and the capstone's parsing, validation and reason-then-structure planner. The screenshot command prints one line per test:
+
+```bash
+python3 -m unittest discover -s tests -v 2>&1 >/dev/null | grep -E ' \.\.\. (ok|FAIL|ERROR)$|^Ran|^OK|^FAILED' | sed -E 's/ \([^)]*\)//'
+```
+
+> The screenshot shows `Ran 29 tests ... OK`. It was taken before the capstone tests added during the Poridhi run. The suite now has 36 tests (all passing); retake the screenshot to match.
 
 ![Unit tests passing](./assets/l5_unit_tests_proof.png)
 
@@ -493,7 +549,12 @@ The capstone (`capstone/agent_loop.py`) runs one agent step that really uses all
 
 Execution stages:
 1. **Tool Discovery (L4):** `GET /tools` with Bearer token.
-2. **LLM Decision (L5):** DeepSeek-R1 reads the schemas and answers `{"tool": ..., "args": {...}}`. The answer is checked against the discovered schema (known tool, required args, no extra args). If the reasoning was cut off or the tool/args are invalid, the model is asked again with the error as feedback (up to 3 attempts).
+2. **LLM Decision (L5), reason then structure:**
+   - *Reason (choose the tool):* DeepSeek-R1 thinks freely (`<think>`) and answers with ONE tool name. A short answer finishes reliably even on a slow CPU.
+   - *Structure (fill the arguments):* Ollama **structured outputs** (native `/api/chat` with `"format": <JSON schema>`, Ollama 0.5+), locked to the chosen tool's schema, fill its arguments. Decoding is constrained, so the JSON shape cannot be wrong.
+   - *Check:* the call is validated against the discovered schema (known tool, required args, no extra args, argument types) before anything runs. Up to 3 attempts, with the problem fed back each time.
+
+   Why it's split like this: on Poridhi the real 1.5b model picked the right tool when reasoning freely but wrote broken JSON (`{"vendor_id": ["A"]}`, `args` not an object). With constrained decoding alone (no reasoning) the JSON was valid, but it picked the wrong tool. So reasoning chooses the tool and the schema shapes the arguments.
 3. **Tool Execution (L4):** `POST /tools/<name>`.
 4. **Executive Synthesis (L5):** one-sentence summary for operators.
 5. **State (L3):** saved as `done`, or `failed` if the tool reported `ok: false`.
@@ -524,7 +585,9 @@ Run it a second time: the step is skipped (`already done in run ...`), because L
 
 > If httpbin.org answers 502/503, the tool returns `ok: false`, the summary says so, the state is `failed`, and the exit code is `1`. That is the correct, honest behaviour; rerun later or set `VENDOR_API_URL` in the repo-root `.env` (see Lab 4).
 
-![Capstone run: L3 + L4 + L5](./assets/l5_capstone_run.png)
+**Status on Poridhi (1.9 GB RAM, 2 vCPU, CPU only):** tool discovery (L4), L3 state and the validation layer work. The 1.5b model did not yet complete a fully valid tool call within 3 attempts on that machine. It chose the right tool when reasoning, but its JSON was malformed, and the validation correctly refused to run anything (exit code 3, screenshot below). The reason-then-structure planner above was written in response and passes its 36 unit tests, but the Poridhi session ended before it could be run against the real model. Run it on a machine with more RAM or a GPU, or retry, and add `assets/l5_capstone_run.png`.
+
+![Capstone validation refusing malformed model output](./assets/l5_capstone_validation_rejects.png)
 
 ---
 

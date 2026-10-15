@@ -66,6 +66,8 @@ docker-compose.debug.yml              # Optional: publish mcp-server on 127.0.0.
 
 ---
 
+> **Verified on Poridhi (2026-10-16):** every screenshot in Chapters 7 and 8 was taken in the Poridhi cloud VS Code (code-server, Ubuntu, Docker 29.7, Compose v5.5, Python 3.12.3) from a fresh `git clone`, running the real images with Docker Compose and the real httpbin.org vendor API. That run found one Poridhi-specific problem (the `grep` colour alias breaking the token, see 8.3), which is fixed below. In every screenshot, **red boxes** mark the command that was run and the output lines the text below refers to.
+
 ## Chapter 1 — Environment Prerequisites & Configuration
 
 Confirm your Docker environment and Python installation:
@@ -746,13 +748,14 @@ python3 -m unittest discover -s tests -v
    - `test_wrong_token_aborts_cleanly`: Confirms exit code 2 on token rejection.
    - `test_service_down_aborts_cleanly`: Confirms exit code 2 when port is unreachable.
 
-All 16 architectural and integration tests pass:
+All 16 architectural and integration tests pass. The verbose output is longer than one screen (the tool service logs a deliberate crash in `test_internal_errors_do_not_leak_details`), so the screenshot lists the tests per file and then shows the unittest result:
 
+```bash
+for f in tests/test_*.py; do echo "$f: $(grep -c 'def test_' $f) tests"; grep -o 'def test_[a-z0-9_]*' $f | sed 's/def /   /'; done
+python3 -m unittest discover -s tests 2>&1 >/dev/null | tail -3
 ```
-Ran 16 tests in 7.576s
 
-OK
-```
+It shows 4 + 4 + 8 test names, `Ran 16 tests` and `OK`:
 
 ![16 automated tests passing](./assets/l4_unit_tests.png)
 
@@ -773,11 +776,13 @@ Launch the tool service with the debug override (so you can curl it from the ter
 ```bash
 export COMPOSE_FILE=docker-compose.yml:docker-compose.debug.yml
 docker compose up -d --wait
-docker compose ps
+docker compose ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}'
 docker compose logs mcp-server | tail -5
 ```
 
-`mcp-server` shows `(healthy)` and the log shows gunicorn listening on `0.0.0.0:8080` with 2 workers.
+On Poridhi the container was `Healthy` after 6.5 s. `docker compose ps` shows `(healthy)` with the port bound to `127.0.0.1:8080` only, and the log shows gunicorn 22.0.0 `Listening at: http://0.0.0.0:8080` (inside the container) and booting 2 workers:
+
+![MCP Server Startup & Authenticated Traffic Proof](./assets/l4_mcp_server_startup.png)
 
 Or when running locally on Windows without Docker (development only, Flask dev server):
 ```powershell
@@ -785,30 +790,39 @@ $env:MCP_TOKEN = (Get-Content .env | Where-Object { $_ -match '^MCP_TOKEN=(.+)' 
 python mcp-server/server.py
 ```
 
-![MCP Server Startup & Authenticated Traffic Proof](./assets/l4_mcp_server_startup.png)
-
 ### 8.3 Verify Tool Discovery Endpoint and Auth
 Query the tool catalog with and without your Bearer token:
 
 **In Bash:**
 ```bash
-TOKEN=$(grep '^MCP_TOKEN=' .env | cut -d '=' -f2-)
+TOKEN=$(sed -n 's/^MCP_TOKEN=//p' .env)
 curl -s http://127.0.0.1:8080/health; echo
 curl -s -o /dev/null -w "without token -> HTTP %{http_code}\n" http://127.0.0.1:8080/tools
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/tools | python3 -m json.tool
 ```
 
+> Read the token with `sed`, not `grep ... | cut`: on Poridhi (and some other machines) `grep` is aliased to `grep --color=always`, which wraps the match in invisible colour codes, so `$TOKEN` gets 6 extra characters and every call returns `401`.
+
 `/health` needs no token, `/tools` without a token returns `401`, and with the token returns the JSON schemas. (`python3 -m json.tool` is used instead of `jq` because `jq` is often not installed.)
+
+The full schema JSON is longer than one screen, so the screenshot prints the three checks with labels and one line per tool:
+
+```bash
+echo '== GET /health (no auth)'; curl -s http://127.0.0.1:8080/health; echo
+echo '== GET /tools without token'; curl -s -w ' -> HTTP %{http_code}\n' http://127.0.0.1:8080/tools
+echo '== GET /tools with Bearer token'
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/tools | python3 -c "import sys,json; [print(' ', t['name'], '| required:', t['input_schema']['required'], '| properties:', t['input_schema']['properties'], '| additionalProperties:', t['input_schema']['additionalProperties']) for t in json.load(sys.stdin)['tools']]"
+```
+
+It shows the health JSON (`version 0.2.0`, three tool names), `{"error":"unauthorized"} -> HTTP 401` without the token, and with the token each tool with its required arguments, argument types and `additionalProperties: False`:
+
+![MCP Tool Discovery Schema Response Proof](./assets/l4_mcp_tools_discovery.png)
 
 **In PowerShell (local, no Docker):**
 ```powershell
 $token = (Get-Content .env | Where-Object { $_ -match '^MCP_TOKEN=(.+)' } | ForEach-Object { $matches[1] })
 (Invoke-RestMethod -Uri http://127.0.0.1:8080/tools -Headers @{ Authorization = "Bearer $token" } | ConvertTo-Json -Depth 5 -Compress) | python -m json.tool --indent 2
 ```
-
-The tool service responds with HTTP 200 and publishes strict JSON Schemas for each registered tool:
-
-![MCP Tool Discovery Schema Response Proof](./assets/l4_mcp_tools_discovery.png)
 
 ### 8.4 Seed the Work Queue
 Seed the job queue into the `agent_data` volume:
@@ -826,6 +840,16 @@ echo $?
 ```
 Exit code `0` = all tasks done, `1` = some task still failed after retries (for example httpbin.org returned 502), `2` = tool service unusable (no state touched). Running it again resumes: `done` tasks are skipped and `failed` ones are retried.
 
+The screenshot runs 8.4 and 8.5 together (Compose's own container messages hidden):
+
+```bash
+docker compose run --rm agent python seed_queue.py 2>/dev/null; docker compose run --rm agent 2>/dev/null; echo "exit=$?"
+```
+
+It shows `Seeded 4 tasks into the queue`, the three vendors `Completed ... 'ok': True` through the tool service, `manifest-1` completed with 3 anomalies (`S2` weight `0`, `S3` empty, `S4` `abc`), `finished: {'done': 4}` and `exit=0`:
+
+![Orchestrator Batch Run Execution Proof](./assets/l4_orchestrator_batch_run.png)
+
 **Or directly in PowerShell (local, no Docker):**
 ```powershell
 $env:MCP_URL = "http://127.0.0.1:8080"
@@ -835,10 +859,6 @@ python agent-stack/orchestrator.py
 $LASTEXITCODE
 ```
 
-The orchestrator dispatches status and manifest tasks to the tool service, completing all 4 tasks and atomically recording state:
-
-![Orchestrator Batch Run Execution Proof](./assets/l4_orchestrator_batch_run.png)
-
 ### 8.6 Prove crash recovery inside containers
 The L3 guarantee must survive containerization. Kill the agent container hard after one task (`os._exit(137)`), then run it again with the same `RUN_ID`. State lives in the `agent_data` volume, not in the container:
 
@@ -847,7 +867,15 @@ docker compose run --rm -e RUN_ID=crash-test -e CRASH_AFTER=1 agent; echo "exit=
 docker compose run --rm -e RUN_ID=crash-test agent; echo "exit=$?"
 ```
 
-Run 1 exits `137` after `vendor-a`; run 2 skips `vendor-a (already done in run crash-test)`, finishes the rest, and exits `0`.
+The screenshot runs both, trims the timestamp column of run 2 to fit (`cut -c41-`), and adds the non-root check:
+
+```bash
+docker compose run --rm -e RUN_ID=crash-test -e CRASH_AFTER=1 agent 2>/dev/null; echo "exit=$?"
+docker compose run --rm -e RUN_ID=crash-test agent 2>/dev/null | cut -c41-; echo "exit=${PIPESTATUS[0]}"
+docker compose run --rm agent id 2>/dev/null
+```
+
+Run 1 completes `vendor-a`, prints `CRASH HOOK: dying hard after 1 task(s)` and exits `137`. Run 2 starts with `state so far {'done': 1}`, skips `vendor-a (already done in run crash-test)`, finishes the other 3 tasks (`finished: {'done': 4}`) and exits `0`. The last line, `uid=10001(agent)`, shows the job runs as a non-root user:
 
 ![Crash recovery inside containers](./assets/l4_crash_recovery_docker.png)
 

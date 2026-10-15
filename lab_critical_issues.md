@@ -47,3 +47,12 @@
 | Capstone: টুল `ok: false` হলেও "SUCCESS" | মিথ্যা সফলতা | সৎ exit code (0/1/2/3) ✅ |
 | Capstone: `<think>` কেটে গেলে বা ভুল টুল নাম দিলে traceback | 1.5b মডেলে প্রায়ই ঘটে | schema যাচাই + ৩ বার retry ✅ |
 | L5 `.md`-এ GPU yaml ভুল (`- count: all` আলাদা item) | কপি করলে GPU কাজ করবে না | ঠিক ✅ |
+
+## Poridhi-তে আসল রান (২০২৬-১০-১৬) থেকে পাওয়া সমস্যা
+
+| সমস্যা | প্রভাব | এখন |
+|---|---|---|
+| Poridhi-তে `grep` = `grep --color=always` alias | `TOKEN=$(grep ... \| cut ...)`-এ ৬টি অদৃশ্য অক্ষর ঢোকে, সব কল 401 | `.md`/runbook-এ `sed -n 's/^MCP_TOKEN=//p' .env` ✅ |
+| Poridhi VM-এ RAM মাত্র 1.9 GB, মডেলের লাগে 1.7 GiB | client HTTP 500, "model requires more system memory" | 3 GB swap যোগ, `.md`-তে লেখা ✅ |
+| 2 vCPU-তে ~4 token/s, R1-এর উত্তর ২-৪ মিনিট | 120 s timeout-এ request বাতিল (500, 2m0s) | `INFERENCE_TIMEOUT=600` (client), capstone 900 ✅ |
+| আসল DeepSeek `{"vendor_id": ["A"]}` (string-এর বদলে list) দিল | tool service 400 দেয়, capstone থেমে যায় | capstone এখন type-ও যাচাই করে, feedback দিয়ে retry ✅ (৩০টি টেস্ট) |
