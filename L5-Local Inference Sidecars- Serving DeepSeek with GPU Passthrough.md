@@ -1,6 +1,5 @@
 # Lab 5: Local Inference Sidecars — Serving DeepSeek with GPU Passthrough & CPU Fallback
 
-> **Verified on Poridhi (2026-10-16):** the screenshots in Chapter 5 were taken in the Poridhi cloud VS Code (code-server, Ubuntu, 1.9 GB RAM, 2 vCPU, no GPU, Docker 29.7) from a fresh `git clone`. That machine needed two changes, both documented below: 3 GB of swap (the model needs 1.7 GiB) and a longer client timeout (about 4 tokens/s on 2 vCPUs). The capstone (Chapter 6) was not completed there; see its status note. In every screenshot, **red boxes** mark the command that was run and the output lines the text below refers to.
 
 ## Introduction
 
