@@ -598,3 +598,76 @@ docker compose down
 ```
 
 > **Note on Persistent Volumes:** Because we declared named volume `ollama_models:`, running `docker compose down` will NOT delete the model weights. The next time you run `docker compose up -d`, startup takes under 2 seconds with zero network downloads. To permanently remove cached weights, pass the `-v` flag (`docker compose down -v`).
+
+---
+
+## Chapter 8 — Production Reality: Top Architectural Pillars for Lab 5
+
+| Dimension | Toy Implementation | Production Reality |
+| :--- | :--- | :--- |
+| **Model Hosting & Privacy** | Calling external third-party APIs (OpenAI/Anthropic) with data leakage risks, unpredictable latency, and token fees | **Local Inference Sidecar (Ollama)** running directly inside an isolated container with zero data leaving the host boundary |
+| **Model Weight Persistence** | Pulling multi-gigabyte models on every container launch (breaks offline/air-gapped operations) | **Docker Named Volume (`ollama_models:/root/.ollama`)** caching weights on host disk; zero network downloads on subsequent restarts |
+| **Readiness Healthcheck** | Naive port checks (`wget /api/tags` or TCP ping) declaring ready while model is still downloading | **Model-Aware Readiness Probe** (`ollama list | grep <model>`) verifying the specific LLM is fully loaded into local registry |
+| **Hardware Flexibility** | Requiring expensive dedicated NVIDIA GPUs or crashing on CPU | **Decoupled Compute Architecture**: default CPU execution with zero driver overhead + optional GPU Passthrough (`docker-compose.gpu.yml`) |
+| **Reasoning Token Parsing** | Raw `<think>` reasoning dumps leaking into user-facing outputs and breaking downstream JSON parsers | **Clean Token Stripping (`strip_think`)** isolating chain-of-thought tokens while passing clean executive responses |
+| **Agent Decision Making** | Hardcoded `if/else` logic or single-pass LLM calls producing broken JSON syntax | **Reason-then-Structure Pattern**: DeepSeek-R1 free-form thinking selects the tool, Ollama JSON schema constrained decoding guarantees valid arguments |
+| **System Resiliency** | Unbounded timeouts freezing client processes indefinitely | **Configurable Timeouts & Exponential Backoff** (`INFERENCE_TIMEOUT`, retry loops, explicit exit codes `0, 2, 3, 4`) |
+
+---
+
+## Chapter 9 — Conclusion & Full-Stack Synthesis (Labs 3, 4, and 5)
+
+Through the completion of Labs 3, 4, and 5, you have transformed a brittle, deterministic Python script into an enterprise-grade, containerized autonomous agent platform:
+
+```mermaid
+flowchart TD
+    subgraph Host ["Host / Scheduling Environment"]
+        Queue[("Persistent Queue<br/>(L3: queue.json)")]
+        Runner["Agent Runner / Orchestrator<br/>(capstone/agent_loop.py)"]
+        State[("Atomic Memory State<br/>(L3: memory/state.json)")]
+    end
+
+    subgraph L5Sidecar ["Lab 5: Local Inference Sidecar (Port 11434)"]
+        Ollama["Ollama Engine<br/>(CPU / NVIDIA CUDA)"]
+        DeepSeek["DeepSeek-R1:1.5b<br/>(Local Weights in ollama_models volume)"]
+        Ollama --- DeepSeek
+    end
+
+    subgraph L4ToolService ["Lab 4: Containerized Tool Service (Port 8080)"]
+        Gunicorn["Gunicorn WSGI + Flask<br/>(Bearer Token Auth)"]
+        Tools["MCP Tools Catalog<br/>(GET /tools & POST /tools/:name)"]
+        Gunicorn --- Tools
+    end
+
+    Queue -->|1. Pop Next Task| Runner
+    Runner -->|2. Task & Tools Context| DeepSeek
+    DeepSeek -->|3. Reason-then-Structure Tool Call| Runner
+    Runner -->|4. Authenticated HTTP POST| Tools
+    Tools -->|5. Execution Output| Runner
+    Runner -->|6. Result Synthesis| DeepSeek
+    DeepSeek -->|7. Clean Executive Summary| Runner
+    Runner -->|8. Atomic Checkpoint (fsync)| State
+```
+
+### The Three Architectural Milestones Achieved:
+
+1. **Lab 3 (Durable Memory & Queue Resilience):**
+   - Implemented run-scoped (`run_id`) state tracking.
+   - Enforced atomic write patterns with temporary file swaps and OS-level `fsync`.
+   - Guaranteed at-least-once task execution with zero duplicate work upon resume after hard kills (`kill -9` / `exit 137`).
+
+2. **Lab 4 (Packaging MCP Tool Services):**
+   - De-coupled tools from the orchestrator into a standalone containerized microservice.
+   - Standardized dynamic tool discovery (`GET /tools`) via strict JSON schemas.
+   - Hardened container security with non-root UID 10001, `read_only` filesystems, dropped capabilities (`cap_drop: [ALL]`), and Bearer token authentication.
+
+3. **Lab 5 (Local Inference Sidecars & Autonomous Reasoning):**
+   - Replaced deterministic decision branches with a local `deepseek-r1:1.5b` LLM running in an Ollama sidecar container.
+   - Solved the small-model JSON formatting problem via the two-phase **Reason-then-Structure** planner (free-form reasoning for tool selection followed by schema-constrained decoding for argument extraction).
+   - Achieved 100% offline, air-gapped readiness with zero third-party API dependencies or recurring token costs.
+
+### Final Verification Checklist
+- [x] Docker Compose configured with model-aware readiness healthcheck.
+- [x] Persistent named volume (`ollama_models`) verified across restarts.
+- [x] Resilient Python inference client with `<think>` parser and unit tests passing.
+- [x] Capstone loop seamlessly coordinating L3 state, L4 tool microservice, and L5 DeepSeek model.
