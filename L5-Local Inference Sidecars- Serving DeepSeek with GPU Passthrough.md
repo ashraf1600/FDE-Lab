@@ -618,35 +618,7 @@ docker compose down
 
 Through the completion of Labs 3, 4, and 5, you have transformed a brittle, deterministic Python script into an enterprise-grade, containerized autonomous agent platform:
 
-```mermaid
-flowchart TD
-    subgraph Host ["Host / Scheduling Environment"]
-        Queue[("Persistent Queue<br/>(L3: queue.json)")]
-        Runner["Agent Runner / Orchestrator<br/>(capstone/agent_loop.py)"]
-        State[("Atomic Memory State<br/>(L3: memory/state.json)")]
-    end
 
-    subgraph L5Sidecar ["Lab 5: Local Inference Sidecar (Port 11434)"]
-        Ollama["Ollama Engine<br/>(CPU / NVIDIA CUDA)"]
-        DeepSeek["DeepSeek-R1:1.5b<br/>(Local Weights in ollama_models volume)"]
-        Ollama --- DeepSeek
-    end
-
-    subgraph L4ToolService ["Lab 4: Containerized Tool Service (Port 8080)"]
-        Gunicorn["Gunicorn WSGI + Flask<br/>(Bearer Token Auth)"]
-        Tools["MCP Tools Catalog<br/>(GET /tools & POST /tools/:name)"]
-        Gunicorn --- Tools
-    end
-
-    Queue -->|1. Pop Next Task| Runner
-    Runner -->|2. Task & Tools Context| DeepSeek
-    DeepSeek -->|3. Reason-then-Structure Tool Call| Runner
-    Runner -->|4. Authenticated HTTP POST| Tools
-    Tools -->|5. Execution Output| Runner
-    Runner -->|6. Result Synthesis| DeepSeek
-    DeepSeek -->|7. Clean Executive Summary| Runner
-    Runner -->|8. Atomic Checkpoint (fsync)| State
-```
 
 ### The Three Architectural Milestones Achieved:
 
