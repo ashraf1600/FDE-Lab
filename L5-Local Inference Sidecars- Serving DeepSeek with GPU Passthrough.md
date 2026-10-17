@@ -1,6 +1,5 @@
 # Lab 5: Local Inference Sidecars — Serving DeepSeek with GPU Passthrough & CPU Fallback
 
-> **Verified on Poridhi (2026-10-16):** the screenshots in Chapter 5 were taken in the Poridhi cloud VS Code (code-server, Ubuntu, 1.9 GB RAM, 2 vCPU, no GPU, Docker 29.7) from a fresh `git clone`. That machine needed two changes, both documented below: 3 GB of swap (the model needs 1.7 GiB) and a longer client timeout (about 4 tokens/s on 2 vCPUs). The capstone (Chapter 6) was not completed there; see its status note. In every screenshot, **red boxes** mark the command that was run and the output lines the text below refers to.
 
 ## Introduction
 
@@ -471,7 +470,7 @@ The screenshot command combines the start and the status (build output trimmed t
 docker compose up -d --build --wait 2>&1 | tail -6 && docker compose ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}'
 ```
 
-On Poridhi the container went `Creating → Started → Waiting → Healthy`, and was `Up 28 seconds (healthy)` on `127.0.0.1:11434`, including the first download of the 1.1 GB model:
+
 
 ![Inference server built and healthy](./assets/l5_poridhi_server_startup.png)
 
@@ -500,7 +499,7 @@ On a slow CPU, R1's reasoning takes longer than the default 120 s read timeout: 
 time INFERENCE_TIMEOUT=600 docker compose run --rm inference-client 2>/dev/null; echo "exit=$?"
 ```
 
-On Poridhi this took 2 min 6 s and exited `0`. The summary is correct: resolved at 04:02 UTC, 14 shipments delayed with no data loss, root cause an API rate limit on the 03:00 polling job, fix a 10-minute polling cadence with backoff:
+
 
 ![Client summarizing the vendor incident](./assets/l5_client_summarize_proof.png)
 
@@ -671,3 +670,4 @@ flowchart TD
 - [x] Persistent named volume (`ollama_models`) verified across restarts.
 - [x] Resilient Python inference client with `<think>` parser and unit tests passing.
 - [x] Capstone loop seamlessly coordinating L3 state, L4 tool microservice, and L5 DeepSeek model.
+
